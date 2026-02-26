@@ -28,7 +28,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { Lead, LeadDetail, Reminder, Template, CustomFieldDefinition, Company } from './types';
+import { Lead, LeadDetail, Reminder, Template, CustomFieldDefinition, Company, ResearchCandidate } from './types';
 
 const STATUS_COLORS = {
   'New': 'bg-blue-100 text-blue-700 border-blue-200',
@@ -56,10 +56,11 @@ export default function App() {
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [isEditingLead, setIsEditingLead] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'History' | 'Reminders' | 'Custom' | 'Activity'>('History');
+  const [isResearchReviewOpen, setIsResearchReviewOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'History' | 'Contacts' | 'Reminders' | 'Custom' | 'Activity'>('History');
   const [searchQuery, setSearchQuery] = useState('');
   const [newComm, setNewComm] = useState({ type: 'Note', content: '', subject: '' });
-  const [newLead, setNewLead] = useState({ name: '', company_id: '', company: '', email: '', status: 'New' as Lead['status'] });
+  const [newContact, setNewContact] = useState({ name: '', title: '', email: '', linkedin_url: '', bio: '' });
   const [newCompany, setNewCompany] = useState({ name: '', website: '' });
   const [editingLead, setEditingLead] = useState({
     name: '',
@@ -73,6 +74,8 @@ export default function App() {
   const [newReminder, setNewReminder] = useState({ task: '', due_at: '' });
   const [newTemplate, setNewTemplate] = useState({ name: '', content: '' });
   const [newFieldName, setNewFieldName] = useState('');
+  const [researchRunId, setResearchRunId] = useState('');
+  const [researchCandidates, setResearchCandidates] = useState<(ResearchCandidate & { selected: boolean })[]>([]);
 
   const USER_EMAIL = 'ivucicev@gmail.com';
 
@@ -204,23 +207,21 @@ If linkedin_url is unknown, set it to an empty string.`,
 
   const handleAddLead = async (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = {
-      ...newLead,
-      company_id: newLead.company_id ? parseInt(newLead.company_id, 10) : undefined,
-      user_email: USER_EMAIL
-    };
-    await fetch('/api/leads', {
+    if (!selectedLeadId) {
+      alert('Select a company lead first.');
+      return;
+    }
+    await fetch(`/api/leads/${selectedLeadId}/contacts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(newContact),
     });
     setIsAddingLead(false);
-    setNewLead({ name: '', company_id: '', company: '', email: '', status: 'New' });
-    fetchLeads();
-    fetchCompanies();
+    setNewContact({ name: '', title: '', email: '', linkedin_url: '', bio: '' });
+    fetchLeadDetail(selectedLeadId);
   };
 
-  const createCompany = async (): Promise<number | null> => {
+  const createCompany = async (): Promise<{ companyId: number; leadId: number } | null> => {
     const res = await fetch('/api/companies', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -231,29 +232,30 @@ If linkedin_url is unknown, set it to an empty string.`,
       alert(data.error || 'Failed to create company');
       return null;
     }
-    return data.id as number;
+    return { companyId: data.id as number, leadId: data.lead_id as number };
   };
 
   const handleAddCompany = async (e: React.FormEvent) => {
     e.preventDefault();
-    const companyId = await createCompany();
-    if (!companyId) return;
+    const created = await createCompany();
+    if (!created) return;
 
-    setNewLead(prev => ({ ...prev, company_id: String(companyId) }));
     setNewCompany({ name: '', website: '' });
     setIsAddingCompany(false);
-    setIsAddingLead(true);
+    setSelectedLeadId(created.leadId);
+    fetchLeads();
     fetchCompanies();
   };
 
   const handleAddCompanyAndResearch = async () => {
-    const companyId = await createCompany();
-    if (!companyId) return;
+    const created = await createCompany();
+    if (!created) return;
 
-    setNewLead(prev => ({ ...prev, company_id: String(companyId) }));
+    setSelectedLeadId(created.leadId);
     setNewCompany({ name: '', website: '' });
     setIsAddingCompany(false);
-    await handleResearchCompanyContacts(companyId);
+    await handleResearchCompanyContacts(created.companyId);
+    fetchLeadDetail(created.leadId);
     fetchCompanies();
   };
 
@@ -263,14 +265,46 @@ If linkedin_url is unknown, set it to an empty string.`,
       const res = await fetch(`/api/companies/${companyId}/research-contacts`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to research contacts');
-      alert(`Added ${data.created} contact(s) from ${data.total_suggested} suggestions.`);
-      fetchLeads();
-      fetchCompanies();
+      const candidates = (data.contacts || []).map((c: ResearchCandidate) => ({ ...c, selected: true }));
+      if (!candidates.length) {
+        alert('No high-confidence company-matched candidates found.');
+        return;
+      }
+      setResearchRunId(data.run_id || '');
+      setResearchCandidates(candidates);
+      setIsResearchReviewOpen(true);
     } catch (error: any) {
       alert(error.message);
     } finally {
       setIsResearchingCompanyContacts(false);
     }
+  };
+
+  const handleApproveResearchCandidates = async () => {
+    if (!selectedLeadId) return;
+    const approved = researchCandidates.filter(c => c.selected);
+    if (!approved.length) {
+      alert('Select at least one candidate.');
+      return;
+    }
+    const res = await fetch(`/api/leads/${selectedLeadId}/contacts/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        research_run_id: researchRunId,
+        contacts: approved.map(({ selected, ...rest }) => rest),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Failed to add approved contacts');
+      return;
+    }
+    setIsResearchReviewOpen(false);
+    setResearchCandidates([]);
+    setResearchRunId('');
+    alert(`Added ${data.created} approved contact(s).`);
+    if (selectedLeadId) fetchLeadDetail(selectedLeadId);
   };
 
   const startEditLead = () => {
@@ -520,7 +554,13 @@ If linkedin_url is unknown, set it to an empty string.`,
             Add Company
           </button>
           <button 
-            onClick={() => setIsAddingLead(true)}
+            onClick={() => {
+              if (!selectedLeadId) {
+                alert('Select a company lead first.');
+                return;
+              }
+              setIsAddingLead(true);
+            }}
             className="bg-white border border-slate-200 hover:border-slate-300 text-slate-700 px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
           >
             <Users className="w-4 h-4" />
@@ -593,9 +633,9 @@ If linkedin_url is unknown, set it to an empty string.`,
                 className="flex flex-col h-full"
               >
                 {/* Detail Header */}
-                <div className="p-6 border-b border-slate-100 flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
+                <div className="relative p-6 border-b border-slate-100 flex items-start justify-between">
+                  <div className="flex-1 pr-12">
+                    <div className="flex flex-wrap items-center gap-3 mb-2 pr-8">
                       <h2 className="text-2xl font-bold text-ink">{leadDetail.name}</h2>
                       <select 
                         value={leadDetail.status}
@@ -627,7 +667,7 @@ If linkedin_url is unknown, set it to an empty string.`,
                         onClick={startEditLead}
                         className="flex items-center gap-1.5 px-3 py-1 bg-slate-50 text-slate-700 border border-slate-200 rounded-full text-xs font-bold hover:bg-slate-100 transition-all"
                       >
-                        Edit Contact
+                        Edit Company
                       </button>
                       <button
                         onClick={() => {
@@ -643,7 +683,7 @@ If linkedin_url is unknown, set it to an empty string.`,
                         {isResearchingCompanyContacts ? <Loader2 className="w-3 h-3 animate-spin" /> : <Users className="w-3 h-3" />}
                         {isResearchingCompanyContacts ? 'Researching...' : 'Research People'}
                       </button>
-                      <div className="flex items-center gap-2 ml-auto">
+                      <div className="flex items-center gap-2 sm:ml-auto">
                         <span className="text-[10px] font-bold text-slate-400 uppercase">Assigned To</span>
                         <select 
                           value={leadDetail.assigned_to || ''}
@@ -690,9 +730,9 @@ If linkedin_url is unknown, set it to an empty string.`,
                       </div>
                     )}
                   </div>
-                  <button 
+                  <button
                     onClick={() => handleDeleteLead(leadDetail.id)}
-                    className="p-2 text-slate-400 hover:text-crimson-600 hover:bg-crimson-50 rounded-lg transition-all"
+                    className="absolute top-4 right-4 p-2 text-slate-400 hover:text-crimson-600 hover:bg-crimson-50 rounded-lg border border-slate-100 bg-white transition-all"
                   >
                     <Trash2 className="w-5 h-5" />
                   </button>
@@ -700,7 +740,7 @@ If linkedin_url is unknown, set it to an empty string.`,
 
                 {/* Tabs */}
                 <div className="flex border-b border-slate-100 px-6 bg-white">
-                  {['History', 'Reminders', 'Custom', 'Activity'].map((tab) => (
+                  {['History', 'Contacts', 'Reminders', 'Custom', 'Activity'].map((tab) => (
                     <button
                       key={tab}
                       onClick={() => setActiveTab(tab as any)}
@@ -884,6 +924,63 @@ If linkedin_url is unknown, set it to an empty string.`,
                           </div>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {activeTab === 'Contacts' && (
+                    <div className="max-w-2xl mx-auto space-y-3">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-ink flex items-center gap-2">
+                          <Users className="w-4 h-4 text-emerald-600" />
+                          Company Contacts
+                        </h3>
+                        <button
+                          onClick={() => setIsAddingLead(true)}
+                          className="text-xs font-bold text-crimson-600 hover:text-crimson-700"
+                        >
+                          + Add Contact
+                        </button>
+                      </div>
+                      {leadDetail.contacts?.map((contact) => (
+                        <div key={contact.id} className="p-4 rounded-xl border border-slate-200 bg-white shadow-sm">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-bold text-ink">{contact.name}</p>
+                              {contact.title && <p className="text-xs text-slate-500">{contact.title}</p>}
+                            </div>
+                            <button
+                              onClick={async () => {
+                                if (!confirm('Delete this contact?')) return;
+                                await fetch(`/api/contacts/${contact.id}`, { method: 'DELETE' });
+                                if (selectedLeadId) fetchLeadDetail(selectedLeadId);
+                              }}
+                              className="text-slate-300 hover:text-red-600"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                          <div className="mt-2 space-y-1">
+                            {contact.email && <p className="text-xs text-slate-600">{contact.email}</p>}
+                            {contact.linkedin_url && (
+                              <a className="text-xs text-blue-600 hover:underline" href={contact.linkedin_url} target="_blank" rel="noreferrer">
+                                LinkedIn
+                              </a>
+                            )}
+                            {contact.source_url && (
+                              <a className="block text-xs text-emerald-700 hover:underline" href={contact.source_url} target="_blank" rel="noreferrer">
+                                Evidence
+                              </a>
+                            )}
+                            {typeof contact.confidence === 'number' && (
+                              <p className="text-[10px] text-slate-400">Confidence: {Math.round(contact.confidence * 100)}%</p>
+                            )}
+                            {contact.bio && <p className="text-xs text-slate-500">{contact.bio}</p>}
+                          </div>
+                        </div>
+                      ))}
+                      {(!leadDetail.contacts || leadDetail.contacts.length === 0) && (
+                        <div className="text-center py-10 text-slate-400 text-sm">No contacts yet for this company.</div>
+                      )}
                     </div>
                   )}
 
@@ -1149,33 +1246,19 @@ If linkedin_url is unknown, set it to an empty string.`,
                     type="text" 
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
                     placeholder="John Doe"
-                    value={newLead.name}
-                    onChange={e => setNewLead(prev => ({ ...prev, name: e.target.value }))}
+                    value={newContact.name}
+                    onChange={e => setNewContact(prev => ({ ...prev, name: e.target.value }))}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Company</label>
-                  <select
-                    required
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Title</label>
+                  <input
+                    type="text"
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
-                    value={newLead.company_id}
-                    onChange={e => setNewLead(prev => ({ ...prev, company_id: e.target.value }))}
-                  >
-                    <option value="">Select company</option>
-                    {companies.map(company => (
-                      <option key={company.id} value={company.id}>{company.name}</option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsAddingLead(false);
-                      setIsAddingCompany(true);
-                    }}
-                    className="mt-2 text-xs font-bold text-crimson-600 hover:text-crimson-700"
-                  >
-                    + Create company first
-                  </button>
+                    placeholder="VP Sales"
+                    value={newContact.title}
+                    onChange={e => setNewContact(prev => ({ ...prev, title: e.target.value }))}
+                  />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Email Address</label>
@@ -1183,34 +1266,107 @@ If linkedin_url is unknown, set it to an empty string.`,
                     type="email" 
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
                     placeholder="john@example.com"
-                    value={newLead.email}
-                    onChange={e => setNewLead(prev => ({ ...prev, email: e.target.value }))}
+                    value={newContact.email}
+                    onChange={e => setNewContact(prev => ({ ...prev, email: e.target.value }))}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Initial Status</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {['New', 'Contacted', 'Qualified', 'Closed'].map(status => (
-                      <button
-                        key={status}
-                        type="button"
-                        onClick={() => setNewLead(prev => ({ ...prev, status: status as Lead['status'] }))}
-                        className={`px-4 py-2 rounded-xl text-sm font-medium border transition-all ${newLead.status === status ? 'bg-crimson-50 border-crimson-200 text-crimson-600' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'}`}
-                      >
-                        {status}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">LinkedIn URL</label>
+                  <input
+                    type="url"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
+                    placeholder="https://linkedin.com/in/..."
+                    value={newContact.linkedin_url}
+                    onChange={e => setNewContact(prev => ({ ...prev, linkedin_url: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Bio</label>
+                  <textarea
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all min-h-[90px]"
+                    placeholder="Short background..."
+                    value={newContact.bio}
+                    onChange={e => setNewContact(prev => ({ ...prev, bio: e.target.value }))}
+                  />
                 </div>
                 <div className="pt-4">
                   <button 
                     type="submit"
                     className="w-full bg-crimson-600 hover:bg-crimson-700 text-white py-3 rounded-xl font-bold shadow-lg shadow-crimson-600/20 transition-all active:scale-[0.98]"
                   >
-                    Create Contact
+                    Add Contact
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Research Review Modal */}
+      <AnimatePresence>
+        {isResearchReviewOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsResearchReviewOpen(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <h2 className="text-xl font-bold text-ink">Review Research Candidates</h2>
+                <button onClick={() => setIsResearchReviewOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 max-h-[70vh] overflow-y-auto space-y-3">
+                {researchCandidates.map((c, idx) => (
+                  <div key={`${c.name}-${idx}`} className="p-4 rounded-xl border border-slate-200 bg-slate-50/40">
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={c.selected}
+                        onChange={(e) => {
+                          const next = [...researchCandidates];
+                          next[idx] = { ...c, selected: e.target.checked };
+                          setResearchCandidates(next);
+                        }}
+                        className="mt-1"
+                      />
+                      <div className="flex-1">
+                        <p className="text-sm font-bold text-ink">{c.name}</p>
+                        {c.title && <p className="text-xs text-slate-600">{c.title}</p>}
+                        {c.email && <p className="text-xs text-slate-600">{c.email}</p>}
+                        {c.linkedin_url && (
+                          <a href={c.linkedin_url} target="_blank" rel="noreferrer" className="block text-xs text-blue-600 hover:underline">
+                            LinkedIn
+                          </a>
+                        )}
+                        <a href={c.source_url} target="_blank" rel="noreferrer" className="block text-xs text-emerald-700 hover:underline">
+                          Evidence Source
+                        </a>
+                        <p className="text-[10px] text-slate-400">Confidence: {Math.round((c.confidence || 0) * 100)}%</p>
+                        {c.bio && <p className="text-xs text-slate-500 mt-1">{c.bio}</p>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <div className="pt-2 flex justify-end">
+                  <button
+                    onClick={handleApproveResearchCandidates}
+                    className="bg-crimson-600 hover:bg-crimson-700 text-white px-4 py-2 rounded-lg text-sm font-bold"
+                  >
+                    Approve Selected
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}
@@ -1234,7 +1390,7 @@ If linkedin_url is unknown, set it to an empty string.`,
               className="relative bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden"
             >
               <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <h2 className="text-xl font-bold text-ink">Edit Contact</h2>
+                <h2 className="text-xl font-bold text-ink">Edit Company Lead</h2>
                 <button onClick={() => setIsEditingLead(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
                   <X className="w-5 h-5 text-slate-400" />
                 </button>

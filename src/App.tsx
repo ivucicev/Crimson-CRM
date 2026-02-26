@@ -28,7 +28,6 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { GoogleGenAI, Type } from "@google/genai";
 import { Lead, LeadDetail, Communication, Reminder, Template, CustomFieldDefinition } from './types';
 
 const STATUS_COLORS = {
@@ -101,32 +100,36 @@ export default function App() {
     setLeadDetail(data);
   };
 
+  const parseJsonFromText = (text: string) => {
+    const cleaned = text.replace(/```json|```/gi, '').trim();
+    return JSON.parse(cleaned);
+  };
+
+  const generateWithAI = async (prompt: string, json = false): Promise<string> => {
+    const res = await fetch('/api/ai/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, json }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || 'AI generation failed');
+    }
+    return data.text || '';
+  };
+
   const handleEnrichLead = async () => {
     if (!leadDetail) return;
     setIsEnriching(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Find professional information about ${leadDetail.name} who works at ${leadDetail.company}. 
-        Return details like their current job title, a short bio, their company website, and their LinkedIn profile URL if available.`,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING, description: "The person's current job title" },
-              bio: { type: Type.STRING, description: "A short professional biography" },
-              website: { type: Type.STRING, description: "The company's official website URL" },
-              linkedin_url: { type: Type.STRING, description: "The person's LinkedIn profile URL" }
-            },
-            required: ["title", "bio"]
-          }
-        }
-      });
-
-      const enrichedData = JSON.parse(response.text || "{}");
+      const text = await generateWithAI(
+        `Find professional information about ${leadDetail.name} who works at ${leadDetail.company}.
+Return JSON with keys: title, bio, website, linkedin_url.
+Only include fields you are reasonably confident about.`,
+        true
+      );
+      const enrichedData = parseJsonFromText(text);
       
       await fetch(`/api/leads/${leadDetail.id}`, {
         method: 'PATCH',
@@ -151,28 +154,13 @@ export default function App() {
     if (!leadDetail) return;
     setIsScrapingLinkedIn(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Search for the LinkedIn profile of ${leadDetail.name} at ${leadDetail.company}. 
-        Extract their current professional title, a summary of their background (bio), their company's website, and the exact LinkedIn URL.`,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              bio: { type: Type.STRING },
-              website: { type: Type.STRING },
-              linkedin_url: { type: Type.STRING }
-            },
-            required: ["linkedin_url"]
-          }
-        }
-      });
-
-      const scrapedData = JSON.parse(response.text || "{}");
+      const text = await generateWithAI(
+        `Find the LinkedIn profile for ${leadDetail.name} at ${leadDetail.company}.
+Return JSON with keys: title, bio, website, linkedin_url.
+If linkedin_url is unknown, set it to an empty string.`,
+        true
+      );
+      const scrapedData = parseJsonFromText(text);
       
       await fetch(`/api/leads/${leadDetail.id}`, {
         method: 'PATCH',
@@ -253,19 +241,15 @@ export default function App() {
     if (!leadDetail) return;
     setIsGeneratingTemplate(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Generate a professional, personalized outreach email template for a lead.
+      const text = await generateWithAI(`Generate a professional, personalized outreach email template for a lead.
         Lead Name: ${leadDetail.name}
         Company: ${leadDetail.company}
         Bio/Context: ${leadDetail.bio || 'N/A'}
         Industry: ${leadDetail.title || 'N/A'}
         
         The email should be concise, friendly, and focused on starting a conversation.`,
-      });
-      
-      setNewComm(prev => ({ ...prev, type: 'Email', content: response.text || '' }));
+      );
+      setNewComm(prev => ({ ...prev, type: 'Email', content: text || '' }));
     } catch (error) {
       console.error("Generation failed:", error);
       alert("Failed to generate template.");
@@ -278,17 +262,13 @@ export default function App() {
     if (!leadDetail || !newComm.content) return;
     setIsGeneratingSubject(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Based on the following email content and lead company, generate a single compelling email subject line.
+      const text = await generateWithAI(`Based on the following email content and lead company, generate a single compelling email subject line.
         Company: ${leadDetail.company}
         Email Content: ${newComm.content}
         
         Return ONLY the subject line text.`,
-      });
-      
-      setNewComm(prev => ({ ...prev, subject: response.text?.trim() || prev.subject }));
+      );
+      setNewComm(prev => ({ ...prev, subject: text.trim() || prev.subject }));
     } catch (error) {
       console.error("Subject generation failed:", error);
     } finally {

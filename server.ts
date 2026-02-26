@@ -113,6 +113,60 @@ async function startServer() {
 
   app.use(express.json());
 
+  app.post("/api/ai/generate", async (req, res) => {
+    const { prompt, json } = req.body ?? {};
+    const apiKey = process.env.OPENAI_API_KEY;
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+    if (!apiKey) {
+      return res.status(503).json({ error: "OPENAI_API_KEY is not configured" });
+    }
+
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({ error: "A prompt string is required" });
+    }
+
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          messages: [
+            {
+              role: "system",
+              content: json
+                ? "You are a CRM assistant. Return valid JSON only with no markdown wrappers."
+                : "You are a CRM assistant. Be concise and practical.",
+            },
+            { role: "user", content: prompt },
+          ],
+          ...(json ? { response_format: { type: "json_object" } } : {}),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return res.status(response.status).json({ error: `OpenAI request failed: ${errorText}` });
+      }
+
+      const data = await response.json();
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) {
+        return res.status(502).json({ error: "OpenAI returned an empty response" });
+      }
+
+      res.json({ text });
+    } catch (error: any) {
+      console.error("OpenAI generation failed:", error);
+      res.status(500).json({ error: "OpenAI generation failed: " + error.message });
+    }
+  });
+
   // API Routes
   app.get("/api/custom-fields", (req, res) => {
     const fields = db.prepare("SELECT * FROM custom_field_definitions ORDER BY label ASC").all();

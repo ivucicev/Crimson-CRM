@@ -40,9 +40,17 @@ function getTransporter() {
 
 // Initialize Database
 db.exec(`
+  CREATE TABLE IF NOT EXISTS companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    website TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
+    company_id INTEGER,
     company TEXT,
     email TEXT,
     status TEXT DEFAULT 'New',
@@ -52,7 +60,8 @@ db.exec(`
     linkedin_url TEXT,
     enriched_at DATETIME,
     assigned_to TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS communications (
@@ -107,66 +116,192 @@ db.exec(`
   );
 `);
 
+const leadColumns = db.prepare(`PRAGMA table_info(leads)`).all() as Array<{ name: string }>;
+if (!leadColumns.some((col) => col.name === "company_id")) {
+  db.exec("ALTER TABLE leads ADD COLUMN company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL");
+}
+
+// Backfill companies from existing lead.company values.
+const distinctCompanies = db
+  .prepare("SELECT DISTINCT company FROM leads WHERE company IS NOT NULL AND TRIM(company) <> ''")
+  .all() as Array<{ company: string }>;
+const insertCompanyStmt = db.prepare("INSERT OR IGNORE INTO companies (name) VALUES (?)");
+const lookupCompanyStmt = db.prepare("SELECT id FROM companies WHERE name = ?");
+const setLeadCompanyIdStmt = db.prepare(
+  "UPDATE leads SET company_id = ? WHERE company = ? AND (company_id IS NULL OR company_id = 0)"
+);
+for (const row of distinctCompanies) {
+  insertCompanyStmt.run(row.company.trim());
+  const company = lookupCompanyStmt.get(row.company.trim()) as { id: number } | undefined;
+  if (company?.id) {
+    setLeadCompanyIdStmt.run(company.id, row.company.trim());
+  }
+}
+
 async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
   app.use(express.json());
 
+  const openAIModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const openAIKey = process.env.OPENAI_API_KEY;
+
+  const callOpenAI = async (prompt: string, json = false) => {
+    if (!openAIKey) {
+      throw new Error("OPENAI_API_KEY is not configured");
+    }
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAIKey}`,
+      },
+      body: JSON.stringify({
+        model: openAIModel,
+        messages: [
+          {
+            role: "system",
+            content: json
+              ? "You are a CRM assistant. Return valid JSON only with no markdown wrappers."
+              : "You are a CRM assistant. Be concise and practical.",
+          },
+          { role: "user", content: prompt },
+        ],
+        ...(json ? { response_format: { type: "json_object" } } : {}),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI request failed: ${await response.text()}`);
+    }
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (!text) {
+      throw new Error("OpenAI returned an empty response");
+    }
+    return text as string;
+  };
+
   app.post("/api/ai/generate", async (req, res) => {
     const { prompt, json } = req.body ?? {};
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-    if (!apiKey) {
-      return res.status(503).json({ error: "OPENAI_API_KEY is not configured" });
-    }
 
     if (!prompt || typeof prompt !== "string") {
       return res.status(400).json({ error: "A prompt string is required" });
     }
 
     try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content: json
-                ? "You are a CRM assistant. Return valid JSON only with no markdown wrappers."
-                : "You are a CRM assistant. Be concise and practical.",
-            },
-            { role: "user", content: prompt },
-          ],
-          ...(json ? { response_format: { type: "json_object" } } : {}),
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        return res.status(response.status).json({ error: `OpenAI request failed: ${errorText}` });
-      }
-
-      const data = await response.json();
-      const text = data?.choices?.[0]?.message?.content;
-      if (!text) {
-        return res.status(502).json({ error: "OpenAI returned an empty response" });
-      }
-
+      const text = await callOpenAI(prompt, !!json);
       res.json({ text });
     } catch (error: any) {
       console.error("OpenAI generation failed:", error);
-      res.status(500).json({ error: "OpenAI generation failed: " + error.message });
+      const status = error.message.includes("OPENAI_API_KEY") ? 503 : 500;
+      res.status(status).json({ error: "OpenAI generation failed: " + error.message });
     }
   });
 
   // API Routes
+  app.get("/api/companies", (req, res) => {
+    const companies = db.prepare(`
+      SELECT c.*, COUNT(l.id) as contact_count
+      FROM companies c
+      LEFT JOIN leads l ON l.company_id = c.id
+      GROUP BY c.id
+      ORDER BY c.created_at DESC
+    `).all();
+    res.json(companies);
+  });
+
+  app.post("/api/companies", (req, res) => {
+    const { name, website } = req.body ?? {};
+    if (!name || typeof name !== "string") {
+      return res.status(400).json({ error: "Company name is required" });
+    }
+    try {
+      const info = db
+        .prepare("INSERT INTO companies (name, website) VALUES (?, ?)")
+        .run(name.trim(), website || null);
+      res.json({ id: info.lastInsertRowid });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || "Failed to create company" });
+    }
+  });
+
+  app.patch("/api/companies/:id", (req, res) => {
+    const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.params.id) as
+      | { id: number; name: string; website: string | null }
+      | undefined;
+    if (!company) return res.status(404).json({ error: "Company not found" });
+
+    const { name, website } = req.body ?? {};
+    const newName = typeof name === "string" && name.trim() ? name.trim() : company.name;
+    const newWebsite = website !== undefined ? website : company.website;
+
+    db.prepare("UPDATE companies SET name = ?, website = ? WHERE id = ?").run(newName, newWebsite, req.params.id);
+    db.prepare("UPDATE leads SET company = ? WHERE company_id = ?").run(newName, req.params.id);
+    res.json({ success: true });
+  });
+
+  app.post("/api/companies/:id/research-contacts", async (req, res) => {
+    const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.params.id) as
+      | { id: number; name: string; website: string | null }
+      | undefined;
+    if (!company) return res.status(404).json({ error: "Company not found" });
+
+    try {
+      const text = await callOpenAI(
+        `Research likely buyer-side contacts at ${company.name}${company.website ? ` (${company.website})` : ""}.
+Return JSON object with one key: contacts.
+contacts must be an array of 3 to 8 objects with keys:
+name (required), title, email, linkedin_url, bio.
+If unknown, return empty string for optional fields.`,
+        true
+      );
+
+      const parsed = JSON.parse(text.replace(/```json|```/gi, "").trim()) as {
+        contacts?: Array<{
+          name?: string;
+          title?: string;
+          email?: string;
+          linkedin_url?: string;
+          bio?: string;
+        }>;
+      };
+
+      const contacts = parsed.contacts || [];
+      const insertLead = db.prepare(`
+        INSERT INTO leads (name, company_id, company, email, status, title, bio, linkedin_url)
+        VALUES (?, ?, ?, ?, 'New', ?, ?, ?)
+      `);
+      const existingLead = db.prepare("SELECT id FROM leads WHERE company_id = ? AND LOWER(name) = LOWER(?)");
+
+      let created = 0;
+      for (const c of contacts) {
+        const name = c.name?.trim();
+        if (!name) continue;
+        const already = existingLead.get(company.id, name) as { id: number } | undefined;
+        if (already) continue;
+        insertLead.run(
+          name,
+          company.id,
+          company.name,
+          c.email?.trim() || null,
+          c.title?.trim() || null,
+          c.bio?.trim() || null,
+          c.linkedin_url?.trim() || null
+        );
+        created += 1;
+      }
+
+      res.json({ success: true, created, total_suggested: contacts.length });
+    } catch (error: any) {
+      console.error("Company contact research failed:", error);
+      const status = error.message.includes("OPENAI_API_KEY") ? 503 : 500;
+      res.status(status).json({ error: "Failed to research contacts: " + error.message });
+    }
+  });
+
   app.get("/api/custom-fields", (req, res) => {
     const fields = db.prepare("SELECT * FROM custom_field_definitions ORDER BY label ASC").all();
     res.json(fields);
@@ -206,15 +341,44 @@ async function startServer() {
   });
 
   app.get("/api/leads", (req, res) => {
-    const leads = db.prepare("SELECT * FROM leads ORDER BY created_at DESC").all();
+    const leads = db.prepare(`
+      SELECT l.*, COALESCE(c.name, l.company) as company
+      FROM leads l
+      LEFT JOIN companies c ON c.id = l.company_id
+      ORDER BY l.created_at DESC
+    `).all();
     res.json(leads);
   });
 
   app.post("/api/leads", (req, res) => {
-    const { name, company, email, status, user_email } = req.body;
+    const { name, company, company_id, email, status, user_email } = req.body;
+    if (!name) return res.status(400).json({ error: "Contact name is required" });
+
+    let resolvedCompanyName = company;
+    let resolvedCompanyId = company_id;
+    if (company_id) {
+      const existingCompany = db.prepare("SELECT name FROM companies WHERE id = ?").get(company_id) as
+        | { name: string }
+        | undefined;
+      if (existingCompany) {
+        resolvedCompanyName = existingCompany.name;
+      } else {
+        resolvedCompanyId = null;
+      }
+    } else if (company && typeof company === "string" && company.trim()) {
+      db.prepare("INSERT OR IGNORE INTO companies (name) VALUES (?)").run(company.trim());
+      const c = db.prepare("SELECT id, name FROM companies WHERE name = ?").get(company.trim()) as
+        | { id: number; name: string }
+        | undefined;
+      if (c) {
+        resolvedCompanyId = c.id;
+        resolvedCompanyName = c.name;
+      }
+    }
+
     const info = db.prepare(
-      "INSERT INTO leads (name, company, email, status) VALUES (?, ?, ?, ?)"
-    ).run(name, company, email, status || 'New');
+      "INSERT INTO leads (name, company_id, company, email, status) VALUES (?, ?, ?, ?, ?)"
+    ).run(name, resolvedCompanyId || null, resolvedCompanyName || null, email, status || "New");
     const leadId = info.lastInsertRowid;
     
     if (user_email) {
@@ -226,7 +390,12 @@ async function startServer() {
   });
 
   app.get("/api/leads/:id", (req, res) => {
-    const lead = db.prepare("SELECT * FROM leads WHERE id = ?").get(req.params.id);
+    const lead = db.prepare(`
+      SELECT l.*, COALESCE(c.name, l.company) as company
+      FROM leads l
+      LEFT JOIN companies c ON c.id = l.company_id
+      WHERE l.id = ?
+    `).get(req.params.id);
     if (!lead) return res.status(404).json({ error: "Lead not found" });
     
     const comms = db.prepare("SELECT * FROM communications WHERE lead_id = ? ORDER BY created_at DESC").all(req.params.id);
@@ -242,9 +411,30 @@ async function startServer() {
   });
 
   app.patch("/api/leads/:id", (req, res) => {
-    const { status, name, company, email, title, bio, website, linkedin_url, enriched_at, assigned_to, user_email } = req.body;
+    const { status, name, company, company_id, email, title, bio, website, linkedin_url, enriched_at, assigned_to, user_email } = req.body;
     const lead = db.prepare("SELECT * FROM leads WHERE id = ?").get(req.params.id);
     if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+    let resolvedCompanyName = company ?? lead.company;
+    let resolvedCompanyId = company_id ?? lead.company_id;
+    if (company_id !== undefined && company_id !== null) {
+      const selectedCompany = db.prepare("SELECT name FROM companies WHERE id = ?").get(company_id) as
+        | { name: string }
+        | undefined;
+      if (selectedCompany) {
+        resolvedCompanyName = selectedCompany.name;
+        resolvedCompanyId = company_id;
+      }
+    } else if (company !== undefined && typeof company === "string" && company.trim()) {
+      db.prepare("INSERT OR IGNORE INTO companies (name) VALUES (?)").run(company.trim());
+      const c = db.prepare("SELECT id, name FROM companies WHERE name = ?").get(company.trim()) as
+        | { id: number; name: string }
+        | undefined;
+      if (c) {
+        resolvedCompanyId = c.id;
+        resolvedCompanyName = c.name;
+      }
+    }
 
     // Log status change
     if (status && status !== lead.status && user_email) {
@@ -259,11 +449,12 @@ async function startServer() {
     }
 
     db.prepare(
-      "UPDATE leads SET status = ?, name = ?, company = ?, email = ?, title = ?, bio = ?, website = ?, linkedin_url = ?, enriched_at = ?, assigned_to = ? WHERE id = ?"
+      "UPDATE leads SET status = ?, name = ?, company_id = ?, company = ?, email = ?, title = ?, bio = ?, website = ?, linkedin_url = ?, enriched_at = ?, assigned_to = ? WHERE id = ?"
     ).run(
       status ?? lead.status,
       name ?? lead.name,
-      company ?? lead.company,
+      resolvedCompanyId ?? null,
+      resolvedCompanyName ?? null,
       email ?? lead.email,
       title ?? lead.title,
       bio ?? lead.bio,

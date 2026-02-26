@@ -1,6 +1,7 @@
 export interface Lead {
   id: number;
   name: string;
+  company_id?: number | null;
   company: string;
   email: string;
   status: 'New' | 'Contacted' | 'Qualified' | 'Closed';
@@ -63,4 +64,12 @@ export interface LeadDetail extends Lead {
   reminders: Reminder[];
   custom_fields: CustomFieldValue[];
   activity_logs: ActivityLog[];
+}
+
+export interface Company {
+  id: number;
+  name: string;
+  website?: string;
+  contact_count?: number;
+  created_at: string;
 }

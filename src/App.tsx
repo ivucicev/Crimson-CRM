@@ -28,7 +28,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { Lead, LeadDetail, Communication, Reminder, Template, CustomFieldDefinition } from './types';
+import { Lead, LeadDetail, Reminder, Template, CustomFieldDefinition, Company } from './types';
 
 const STATUS_COLORS = {
   'New': 'bg-blue-100 text-blue-700 border-blue-200',
@@ -39,23 +39,37 @@ const STATUS_COLORS = {
 
 export default function App() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [customFieldDefs, setCustomFieldDefs] = useState<CustomFieldDefinition[]>([]);
   const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
   const [leadDetail, setLeadDetail] = useState<LeadDetail | null>(null);
   const [isAddingLead, setIsAddingLead] = useState(false);
+  const [isAddingCompany, setIsAddingCompany] = useState(false);
   const [isManagingTemplates, setIsManagingTemplates] = useState(false);
   const [isManagingFields, setIsManagingFields] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
+  const [isResearchingCompanyContacts, setIsResearchingCompanyContacts] = useState(false);
   const [isScrapingLinkedIn, setIsScrapingLinkedIn] = useState(false);
   const [isGeneratingTemplate, setIsGeneratingTemplate] = useState(false);
   const [isGeneratingSubject, setIsGeneratingSubject] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [isEditingLead, setIsEditingLead] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'History' | 'Reminders' | 'Custom' | 'Activity'>('History');
   const [searchQuery, setSearchQuery] = useState('');
   const [newComm, setNewComm] = useState({ type: 'Note', content: '', subject: '' });
-  const [newLead, setNewLead] = useState({ name: '', company: '', email: '', status: 'New' as Lead['status'] });
+  const [newLead, setNewLead] = useState({ name: '', company_id: '', company: '', email: '', status: 'New' as Lead['status'] });
+  const [newCompany, setNewCompany] = useState({ name: '', website: '' });
+  const [editingLead, setEditingLead] = useState({
+    name: '',
+    email: '',
+    title: '',
+    bio: '',
+    website: '',
+    linkedin_url: '',
+    company_id: ''
+  });
   const [newReminder, setNewReminder] = useState({ task: '', due_at: '' });
   const [newTemplate, setNewTemplate] = useState({ name: '', content: '' });
   const [newFieldName, setNewFieldName] = useState('');
@@ -64,6 +78,7 @@ export default function App() {
 
   useEffect(() => {
     fetchLeads();
+    fetchCompanies();
     fetchTemplates();
     fetchCustomFields();
   }, []);
@@ -80,6 +95,12 @@ export default function App() {
     const res = await fetch('/api/leads');
     const data = await res.json();
     setLeads(data);
+  };
+
+  const fetchCompanies = async () => {
+    const res = await fetch('/api/companies');
+    const data = await res.json();
+    setCompanies(data);
   };
 
   const fetchTemplates = async () => {
@@ -183,13 +204,102 @@ If linkedin_url is unknown, set it to an empty string.`,
 
   const handleAddLead = async (e: React.FormEvent) => {
     e.preventDefault();
+    const payload = {
+      ...newLead,
+      company_id: newLead.company_id ? parseInt(newLead.company_id, 10) : undefined,
+      user_email: USER_EMAIL
+    };
     await fetch('/api/leads', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...newLead, user_email: USER_EMAIL }),
+      body: JSON.stringify(payload),
     });
     setIsAddingLead(false);
-    setNewLead({ name: '', company: '', email: '', status: 'New' });
+    setNewLead({ name: '', company_id: '', company: '', email: '', status: 'New' });
+    fetchLeads();
+    fetchCompanies();
+  };
+
+  const createCompany = async (): Promise<number | null> => {
+    const res = await fetch('/api/companies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newCompany),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Failed to create company');
+      return null;
+    }
+    return data.id as number;
+  };
+
+  const handleAddCompany = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const companyId = await createCompany();
+    if (!companyId) return;
+
+    setNewLead(prev => ({ ...prev, company_id: String(companyId) }));
+    setNewCompany({ name: '', website: '' });
+    setIsAddingCompany(false);
+    setIsAddingLead(true);
+    fetchCompanies();
+  };
+
+  const handleAddCompanyAndResearch = async () => {
+    const companyId = await createCompany();
+    if (!companyId) return;
+
+    setNewLead(prev => ({ ...prev, company_id: String(companyId) }));
+    setNewCompany({ name: '', website: '' });
+    setIsAddingCompany(false);
+    await handleResearchCompanyContacts(companyId);
+    fetchCompanies();
+  };
+
+  const handleResearchCompanyContacts = async (companyId: number) => {
+    setIsResearchingCompanyContacts(true);
+    try {
+      const res = await fetch(`/api/companies/${companyId}/research-contacts`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to research contacts');
+      alert(`Added ${data.created} contact(s) from ${data.total_suggested} suggestions.`);
+      fetchLeads();
+      fetchCompanies();
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setIsResearchingCompanyContacts(false);
+    }
+  };
+
+  const startEditLead = () => {
+    if (!leadDetail) return;
+    setEditingLead({
+      name: leadDetail.name || '',
+      email: leadDetail.email || '',
+      title: leadDetail.title || '',
+      bio: leadDetail.bio || '',
+      website: leadDetail.website || '',
+      linkedin_url: leadDetail.linkedin_url || '',
+      company_id: leadDetail.company_id ? String(leadDetail.company_id) : ''
+    });
+    setIsEditingLead(true);
+  };
+
+  const handleSaveLeadEdit = async () => {
+    if (!leadDetail) return;
+    await fetch(`/api/leads/${leadDetail.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...editingLead,
+        company_id: editingLead.company_id ? parseInt(editingLead.company_id, 10) : null,
+        user_email: USER_EMAIL
+      }),
+    });
+    setIsEditingLead(false);
+    fetchLeadDetail(leadDetail.id);
     fetchLeads();
   };
 
@@ -396,18 +506,25 @@ If linkedin_url is unknown, set it to an empty string.`,
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input 
               type="text" 
-              placeholder="Search leads..." 
+              placeholder="Search contacts..." 
               className="pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-crimson-500 w-64 transition-all"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
           <button 
-            onClick={() => setIsAddingLead(true)}
+            onClick={() => setIsAddingCompany(true)}
             className="bg-crimson-600 hover:bg-crimson-700 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
           >
             <Plus className="w-4 h-4" />
-            Add Lead
+            Add Company
+          </button>
+          <button 
+            onClick={() => setIsAddingLead(true)}
+            className="bg-white border border-slate-200 hover:border-slate-300 text-slate-700 px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
+          >
+            <Users className="w-4 h-4" />
+            Add Contact
           </button>
           <button 
             onClick={() => setIsManagingTemplates(true)}
@@ -430,7 +547,7 @@ If linkedin_url is unknown, set it to an empty string.`,
         {/* Leads List */}
         <div className="col-span-4 bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
           <div className="p-4 border-b border-slate-100 bg-slate-50/50">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">All Leads ({filteredLeads.length})</h2>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">All Contacts ({filteredLeads.length})</h2>
           </div>
           <div className="flex-1 overflow-y-auto">
             {filteredLeads.map(lead => (
@@ -458,7 +575,7 @@ If linkedin_url is unknown, set it to an empty string.`,
             {filteredLeads.length === 0 && (
               <div className="p-8 text-center text-slate-400">
                 <Users className="w-12 h-12 mx-auto mb-3 opacity-20" />
-                <p>No leads found</p>
+                <p>No contacts found</p>
               </div>
             )}
           </div>
@@ -505,6 +622,26 @@ If linkedin_url is unknown, set it to an empty string.`,
                       >
                         {isScrapingLinkedIn ? <Loader2 className="w-3 h-3 animate-spin" /> : <Linkedin className="w-3 h-3" />}
                         {isScrapingLinkedIn ? 'Scraping...' : 'LinkedIn Scrape'}
+                      </button>
+                      <button
+                        onClick={startEditLead}
+                        className="flex items-center gap-1.5 px-3 py-1 bg-slate-50 text-slate-700 border border-slate-200 rounded-full text-xs font-bold hover:bg-slate-100 transition-all"
+                      >
+                        Edit Contact
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (!leadDetail.company_id) {
+                            alert('Link this contact to a company first, then run research.');
+                            return;
+                          }
+                          handleResearchCompanyContacts(leadDetail.company_id);
+                        }}
+                        disabled={isResearchingCompanyContacts}
+                        className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-full text-xs font-bold hover:bg-emerald-100 transition-all disabled:opacity-50"
+                      >
+                        {isResearchingCompanyContacts ? <Loader2 className="w-3 h-3 animate-spin" /> : <Users className="w-3 h-3" />}
+                        {isResearchingCompanyContacts ? 'Researching...' : 'Research People'}
                       </button>
                       <div className="flex items-center gap-2 ml-auto">
                         <span className="text-[10px] font-bold text-slate-400 uppercase">Assigned To</span>
@@ -906,13 +1043,80 @@ If linkedin_url is unknown, set it to an empty string.`,
                 <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-4">
                   <Users className="w-10 h-10 opacity-20" />
                 </div>
-                <h3 className="text-lg font-semibold text-slate-900 mb-1">Select a lead</h3>
-                <p className="max-w-xs text-sm">Choose a lead from the list to view their details and communication history.</p>
+                <h3 className="text-lg font-semibold text-slate-900 mb-1">Select a contact</h3>
+                <p className="max-w-xs text-sm">Choose a contact from the list to view details, activity, and communication history.</p>
               </div>
             )}
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Add Company Modal */}
+      <AnimatePresence>
+        {isAddingCompany && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsAddingCompany(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <h2 className="text-xl font-bold text-ink">New Company</h2>
+                <button onClick={() => setIsAddingCompany(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <form onSubmit={handleAddCompany} className="p-6 space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Company Name</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
+                    placeholder="Acme Inc."
+                    value={newCompany.name}
+                    onChange={e => setNewCompany(prev => ({ ...prev, name: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Website (Optional)</label>
+                  <input
+                    type="url"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
+                    placeholder="https://acme.com"
+                    value={newCompany.website}
+                    onChange={e => setNewCompany(prev => ({ ...prev, website: e.target.value }))}
+                  />
+                </div>
+                <div className="pt-4">
+                  <button
+                    type="submit"
+                    className="w-full bg-crimson-600 hover:bg-crimson-700 text-white py-3 rounded-xl font-bold shadow-lg shadow-crimson-600/20 transition-all active:scale-[0.98]"
+                  >
+                    Save Company
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddCompanyAndResearch}
+                    disabled={isResearchingCompanyContacts || !newCompany.name.trim()}
+                    className="w-full mt-2 bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl font-bold transition-all disabled:opacity-50"
+                  >
+                    {isResearchingCompanyContacts ? 'Researching People...' : 'Save + Research People'}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Add Lead Modal */}
       <AnimatePresence>
@@ -932,7 +1136,7 @@ If linkedin_url is unknown, set it to an empty string.`,
               className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
             >
               <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <h2 className="text-xl font-bold text-ink">New Lead</h2>
+                <h2 className="text-xl font-bold text-ink">New Contact</h2>
                 <button onClick={() => setIsAddingLead(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
                   <X className="w-5 h-5 text-slate-400" />
                 </button>
@@ -951,13 +1155,27 @@ If linkedin_url is unknown, set it to an empty string.`,
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Company</label>
-                  <input 
-                    type="text" 
+                  <select
+                    required
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none transition-all"
-                    placeholder="Acme Inc."
-                    value={newLead.company}
-                    onChange={e => setNewLead(prev => ({ ...prev, company: e.target.value }))}
-                  />
+                    value={newLead.company_id}
+                    onChange={e => setNewLead(prev => ({ ...prev, company_id: e.target.value }))}
+                  >
+                    <option value="">Select company</option>
+                    {companies.map(company => (
+                      <option key={company.id} value={company.id}>{company.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAddingLead(false);
+                      setIsAddingCompany(true);
+                    }}
+                    className="mt-2 text-xs font-bold text-crimson-600 hover:text-crimson-700"
+                  >
+                    + Create company first
+                  </button>
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Email Address</label>
@@ -989,10 +1207,112 @@ If linkedin_url is unknown, set it to an empty string.`,
                     type="submit"
                     className="w-full bg-crimson-600 hover:bg-crimson-700 text-white py-3 rounded-xl font-bold shadow-lg shadow-crimson-600/20 transition-all active:scale-[0.98]"
                   >
-                    Create Lead
+                    Create Contact
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit Contact Modal */}
+      <AnimatePresence>
+        {isEditingLead && leadDetail && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsEditingLead(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <h2 className="text-xl font-bold text-ink">Edit Contact</h2>
+                <button onClick={() => setIsEditingLead(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Full Name</label>
+                  <input
+                    type="text"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20"
+                    value={editingLead.name}
+                    onChange={e => setEditingLead(prev => ({ ...prev, name: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Company</label>
+                  <select
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20"
+                    value={editingLead.company_id}
+                    onChange={e => setEditingLead(prev => ({ ...prev, company_id: e.target.value }))}
+                  >
+                    <option value="">Unlinked</option>
+                    {companies.map(company => (
+                      <option key={company.id} value={company.id}>{company.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Email</label>
+                  <input
+                    type="email"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20"
+                    value={editingLead.email}
+                    onChange={e => setEditingLead(prev => ({ ...prev, email: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Title</label>
+                  <input
+                    type="text"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20"
+                    value={editingLead.title}
+                    onChange={e => setEditingLead(prev => ({ ...prev, title: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Website</label>
+                  <input
+                    type="url"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20"
+                    value={editingLead.website}
+                    onChange={e => setEditingLead(prev => ({ ...prev, website: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">LinkedIn URL</label>
+                  <input
+                    type="url"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20"
+                    value={editingLead.linkedin_url}
+                    onChange={e => setEditingLead(prev => ({ ...prev, linkedin_url: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Bio</label>
+                  <textarea
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-crimson-500/20 min-h-[100px]"
+                    value={editingLead.bio}
+                    onChange={e => setEditingLead(prev => ({ ...prev, bio: e.target.value }))}
+                  />
+                </div>
+                <button
+                  onClick={handleSaveLeadEdit}
+                  className="w-full bg-crimson-600 hover:bg-crimson-700 text-white py-3 rounded-xl font-bold transition-all"
+                >
+                  Save Changes
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

@@ -114,11 +114,33 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    title TEXT,
+    email TEXT,
+    linkedin_url TEXT,
+    bio TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
+  );
 `);
 
 const leadColumns = db.prepare(`PRAGMA table_info(leads)`).all() as Array<{ name: string }>;
 if (!leadColumns.some((col) => col.name === "company_id")) {
   db.exec("ALTER TABLE leads ADD COLUMN company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL");
+}
+const contactColumns = db.prepare(`PRAGMA table_info(contacts)`).all() as Array<{ name: string }>;
+if (!contactColumns.some((col) => col.name === "source_url")) {
+  db.exec("ALTER TABLE contacts ADD COLUMN source_url TEXT");
+}
+if (!contactColumns.some((col) => col.name === "confidence")) {
+  db.exec("ALTER TABLE contacts ADD COLUMN confidence REAL");
+}
+if (!contactColumns.some((col) => col.name === "research_run_id")) {
+  db.exec("ALTER TABLE contacts ADD COLUMN research_run_id TEXT");
 }
 
 // Backfill companies from existing lead.company values.
@@ -146,6 +168,7 @@ async function startServer() {
 
   const openAIModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
   const openAIKey = process.env.OPENAI_API_KEY;
+  const serperApiKey = process.env.SERPER_API_KEY;
 
   const callOpenAI = async (prompt: string, json = false) => {
     if (!openAIKey) {
@@ -184,6 +207,33 @@ async function startServer() {
     return text as string;
   };
 
+  const searchWeb = async (query: string) => {
+    if (!serperApiKey) {
+      throw new Error("SERPER_API_KEY is not configured for web research");
+    }
+
+    const response = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": serperApiKey,
+      },
+      body: JSON.stringify({ q: query, num: 10 }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Serper request failed: ${await response.text()}`);
+    }
+
+    const data = await response.json();
+    const organic = Array.isArray(data?.organic) ? data.organic : [];
+    return organic.map((item: any) => ({
+      title: item?.title || "",
+      link: item?.link || "",
+      snippet: item?.snippet || "",
+    }));
+  };
+
   app.post("/api/ai/generate", async (req, res) => {
     const { prompt, json } = req.body ?? {};
 
@@ -204,9 +254,10 @@ async function startServer() {
   // API Routes
   app.get("/api/companies", (req, res) => {
     const companies = db.prepare(`
-      SELECT c.*, COUNT(l.id) as contact_count
+      SELECT c.*, COUNT(ct.id) as contact_count
       FROM companies c
       LEFT JOIN leads l ON l.company_id = c.id
+      LEFT JOIN contacts ct ON ct.lead_id = l.id
       GROUP BY c.id
       ORDER BY c.created_at DESC
     `).all();
@@ -222,7 +273,11 @@ async function startServer() {
       const info = db
         .prepare("INSERT INTO companies (name, website) VALUES (?, ?)")
         .run(name.trim(), website || null);
-      res.json({ id: info.lastInsertRowid });
+      const companyId = Number(info.lastInsertRowid);
+      const leadInfo = db
+        .prepare("INSERT INTO leads (name, company_id, company, status) VALUES (?, ?, ?, 'New')")
+        .run(name.trim(), companyId, name.trim());
+      res.json({ id: companyId, lead_id: Number(leadInfo.lastInsertRowid) });
     } catch (error: any) {
       res.status(400).json({ error: error.message || "Failed to create company" });
     }
@@ -249,13 +304,48 @@ async function startServer() {
       | undefined;
     if (!company) return res.status(404).json({ error: "Company not found" });
 
+    if (!company.website || !company.website.trim()) {
+      return res.status(400).json({ error: "Set a company website before researching contacts." });
+    }
+
     try {
+      const domain = new URL(company.website).hostname.replace(/^www\./, "");
+      const queries = [
+        `site:linkedin.com/in "${company.name}" (${domain})`,
+        `site:${domain} team leadership ${company.name}`,
+        `"${company.name}" "VP" OR "Head of" OR "Director"`,
+        `site:linkedin.com "${company.name}" "Account Executive" OR "Sales"`,
+      ];
+      const webResultsNested = await Promise.all(queries.map((q) => searchWeb(q)));
+      const resultMap = new Map<string, { title: string; link: string; snippet: string }>();
+      for (const list of webResultsNested) {
+        for (const r of list) {
+          if (!r.link) continue;
+          if (!resultMap.has(r.link)) resultMap.set(r.link, r);
+        }
+      }
+      const webResults = Array.from(resultMap.values()).slice(0, 40);
+      if (!webResults.length) {
+        return res.status(502).json({ error: "No web results found for this company." });
+      }
+
       const text = await callOpenAI(
-        `Research likely buyer-side contacts at ${company.name}${company.website ? ` (${company.website})` : ""}.
-Return JSON object with one key: contacts.
-contacts must be an array of 3 to 8 objects with keys:
-name (required), title, email, linkedin_url, bio.
-If unknown, return empty string for optional fields.`,
+        `You are extracting company contacts from externally gathered web search results.
+Target company: ${company.name}
+Company website/domain: ${company.website} (${domain})
+
+Search results (JSON):
+${JSON.stringify(webResults)}
+
+Return JSON object with key: contacts.
+contacts must be an array (0-10) with keys:
+name (required), title, email, linkedin_url, bio, source_url (required), confidence (number 0-1), company_match (boolean).
+
+Hard rules:
+- Use ONLY people supported by the provided search results.
+- source_url must be a URL present in the provided results.
+- company_match must be true only when current-company match is explicit.
+- Exclude uncertain people.`,
         true
       );
 
@@ -266,35 +356,30 @@ If unknown, return empty string for optional fields.`,
           email?: string;
           linkedin_url?: string;
           bio?: string;
+          source_url?: string;
+          confidence?: number;
+          company_match?: boolean;
         }>;
       };
 
-      const contacts = parsed.contacts || [];
-      const insertLead = db.prepare(`
-        INSERT INTO leads (name, company_id, company, email, status, title, bio, linkedin_url)
-        VALUES (?, ?, ?, ?, 'New', ?, ?, ?)
-      `);
-      const existingLead = db.prepare("SELECT id FROM leads WHERE company_id = ? AND LOWER(name) = LOWER(?)");
+      const contacts = (parsed.contacts || [])
+        .map((c) => ({
+          name: c.name?.trim() || "",
+          title: c.title?.trim() || "",
+          email: c.email?.trim() || "",
+          linkedin_url: c.linkedin_url?.trim() || "",
+          bio: c.bio?.trim() || "",
+          source_url: c.source_url?.trim() || "",
+          confidence: typeof c.confidence === "number" ? c.confidence : 0,
+          company_match: c.company_match !== false,
+        }))
+        .filter((c) => c.name && c.source_url && c.company_match);
 
-      let created = 0;
-      for (const c of contacts) {
-        const name = c.name?.trim();
-        if (!name) continue;
-        const already = existingLead.get(company.id, name) as { id: number } | undefined;
-        if (already) continue;
-        insertLead.run(
-          name,
-          company.id,
-          company.name,
-          c.email?.trim() || null,
-          c.title?.trim() || null,
-          c.bio?.trim() || null,
-          c.linkedin_url?.trim() || null
-        );
-        created += 1;
-      }
-
-      res.json({ success: true, created, total_suggested: contacts.length });
+      res.json({
+        success: true,
+        run_id: `${Date.now()}-${company.id}`,
+        contacts,
+      });
     } catch (error: any) {
       console.error("Company contact research failed:", error);
       const status = error.message.includes("OPENAI_API_KEY") ? 503 : 500;
@@ -400,6 +485,7 @@ If unknown, return empty string for optional fields.`,
     
     const comms = db.prepare("SELECT * FROM communications WHERE lead_id = ? ORDER BY created_at DESC").all(req.params.id);
     const reminders = db.prepare("SELECT * FROM reminders WHERE lead_id = ? ORDER BY due_at ASC").all(req.params.id);
+    const contacts = db.prepare("SELECT * FROM contacts WHERE lead_id = ? ORDER BY created_at DESC").all(req.params.id);
     const customValues = db.prepare(`
       SELECT d.id as field_id, d.label, v.value 
       FROM custom_field_definitions d
@@ -407,7 +493,90 @@ If unknown, return empty string for optional fields.`,
     `).all(req.params.id);
     const activityLogs = db.prepare("SELECT * FROM activity_logs WHERE lead_id = ? ORDER BY created_at DESC").all(req.params.id);
     
-    res.json({ ...lead, communications: comms, reminders, custom_fields: customValues, activity_logs: activityLogs });
+    res.json({ ...lead, communications: comms, reminders, contacts, custom_fields: customValues, activity_logs: activityLogs });
+  });
+
+  app.post("/api/leads/:id/contacts", (req, res) => {
+    const { name, title, email, linkedin_url, bio, source_url, confidence, research_run_id } = req.body ?? {};
+    if (!name || typeof name !== "string") {
+      return res.status(400).json({ error: "Contact name is required" });
+    }
+    const lead = db.prepare("SELECT id FROM leads WHERE id = ?").get(req.params.id) as { id: number } | undefined;
+    if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+    const info = db.prepare(
+      "INSERT INTO contacts (lead_id, name, title, email, linkedin_url, bio, source_url, confidence, research_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(
+      req.params.id,
+      name.trim(),
+      title || null,
+      email || null,
+      linkedin_url || null,
+      bio || null,
+      source_url || null,
+      typeof confidence === "number" ? confidence : null,
+      research_run_id || null
+    );
+    res.json({ id: info.lastInsertRowid });
+  });
+
+  app.post("/api/leads/:id/contacts/bulk", (req, res) => {
+    const { contacts, research_run_id } = req.body ?? {};
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json({ error: "At least one contact is required" });
+    }
+    const lead = db.prepare("SELECT id FROM leads WHERE id = ?").get(req.params.id) as { id: number } | undefined;
+    if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+    const existingContact = db.prepare("SELECT id FROM contacts WHERE lead_id = ? AND LOWER(name) = LOWER(?)");
+    const insertContact = db.prepare(
+      "INSERT INTO contacts (lead_id, name, title, email, linkedin_url, bio, source_url, confidence, research_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+
+    let created = 0;
+    for (const c of contacts) {
+      const name = (c?.name || "").trim();
+      if (!name) continue;
+      const already = existingContact.get(req.params.id, name) as { id: number } | undefined;
+      if (already) continue;
+      insertContact.run(
+        req.params.id,
+        name,
+        (c?.title || "").trim() || null,
+        (c?.email || "").trim() || null,
+        (c?.linkedin_url || "").trim() || null,
+        (c?.bio || "").trim() || null,
+        (c?.source_url || "").trim() || null,
+        typeof c?.confidence === "number" ? c.confidence : null,
+        research_run_id || null
+      );
+      created += 1;
+    }
+    res.json({ success: true, created });
+  });
+
+  app.patch("/api/contacts/:id", (req, res) => {
+    const contact = db.prepare("SELECT * FROM contacts WHERE id = ?").get(req.params.id) as
+      | { id: number; name: string; title: string | null; email: string | null; linkedin_url: string | null; bio: string | null }
+      | undefined;
+    if (!contact) return res.status(404).json({ error: "Contact not found" });
+    const { name, title, email, linkedin_url, bio } = req.body ?? {};
+    db.prepare(
+      "UPDATE contacts SET name = ?, title = ?, email = ?, linkedin_url = ?, bio = ? WHERE id = ?"
+    ).run(
+      name ?? contact.name,
+      title ?? contact.title,
+      email ?? contact.email,
+      linkedin_url ?? contact.linkedin_url,
+      bio ?? contact.bio,
+      req.params.id
+    );
+    res.json({ success: true });
+  });
+
+  app.delete("/api/contacts/:id", (req, res) => {
+    db.prepare("DELETE FROM contacts WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
   });
 
   app.patch("/api/leads/:id", (req, res) => {

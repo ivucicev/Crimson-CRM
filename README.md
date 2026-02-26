@@ -37,6 +37,7 @@ Prerequisite: Node.js 18+
    `npm install`
 2. Configure environment variables in `.env.local` (use `.env.example` as reference), including:
    `OPENAI_API_KEY`
+   `SERPER_API_KEY` (required for web-grounded company people research)
    `DATABASE_PATH` (optional, defaults to `./data/crimson.db`)
 3. Start the app:
    `npm run dev`

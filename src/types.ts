@@ -59,9 +59,35 @@ export interface ActivityLog {
   created_at: string;
 }
 
+export interface Contact {
+  id: number;
+  lead_id: number;
+  name: string;
+  title?: string | null;
+  email?: string | null;
+  linkedin_url?: string | null;
+  bio?: string | null;
+  source_url?: string | null;
+  confidence?: number | null;
+  research_run_id?: string | null;
+  created_at: string;
+}
+
+export interface ResearchCandidate {
+  name: string;
+  title?: string;
+  email?: string;
+  linkedin_url?: string;
+  bio?: string;
+  source_url: string;
+  confidence: number;
+  company_match: boolean;
+}
+
 export interface LeadDetail extends Lead {
   communications: Communication[];
   reminders: Reminder[];
+  contacts: Contact[];
   custom_fields: CustomFieldValue[];
   activity_logs: ActivityLog[];
 }

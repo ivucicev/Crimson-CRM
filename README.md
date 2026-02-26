@@ -36,7 +36,7 @@ Prerequisite: Node.js 18+
 1. Install dependencies:
    `npm install`
 2. Configure environment variables in `.env.local` (use `.env.example` as reference), including:
-   `GEMINI_API_KEY`
+   `OPENAI_API_KEY`
    `DATABASE_PATH` (optional, defaults to `./data/crimson.db`)
 3. Start the app:
    `npm run dev`

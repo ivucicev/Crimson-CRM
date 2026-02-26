@@ -37,9 +37,16 @@ Prerequisite: Node.js 18+
    `npm install`
 2. Configure environment variables in `.env.local` (use `.env.example` as reference), including:
    `GEMINI_API_KEY`
+   `DATABASE_PATH` (optional, defaults to `./data/crimson.db`)
 3. Start the app:
    `npm run dev`
 4. Open the local URL shown in your terminal.
+
+## Deployment Note (Coolify/Docker)
+
+For persistent SQLite storage in containers, mount a writable volume and set:
+
+`DATABASE_PATH=/app/data/crimson.db`
 
 ## Tech Stack
 

@@ -6,6 +6,7 @@ services:
     environment:
       - NODE_ENV=production
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - DATABASE_PATH=/app/data/crimson.db
     volumes:
-      - ./crimson.db:/app/crimson.db
+      - ./data:/app/data
     restart: always

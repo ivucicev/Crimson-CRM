@@ -1,0 +1,8 @@
+node_modules
+dist
+crimson.db
+crimson.db-journal
+.env
+.git
+Dockerfile
+docker-compose.yml

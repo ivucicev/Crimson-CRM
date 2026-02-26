@@ -9,6 +9,7 @@ export interface Lead {
   website?: string;
   linkedin_url?: string;
   enriched_at?: string;
+  assigned_to?: string;
   created_at: string;
 }
 
@@ -47,8 +48,19 @@ export interface CustomFieldValue {
   value: string | null;
 }
 
+export interface ActivityLog {
+  id: number;
+  lead_id: number;
+  user_email: string;
+  action: string;
+  old_value: string | null;
+  new_value: string | null;
+  created_at: string;
+}
+
 export interface LeadDetail extends Lead {
   communications: Communication[];
   reminders: Reminder[];
   custom_fields: CustomFieldValue[];
+  activity_logs: ActivityLog[];
 }

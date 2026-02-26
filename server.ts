@@ -1,11 +1,37 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
+import nodemailer from "nodemailer";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const db = new Database("crimson.db");
+
+// Nodemailer Transporter
+let transporter: nodemailer.Transporter | null = null;
+
+function getTransporter() {
+  if (!transporter) {
+    const host = process.env.EMAIL_HOST;
+    const port = parseInt(process.env.EMAIL_PORT || "587");
+    const user = process.env.EMAIL_USER;
+    const pass = process.env.EMAIL_PASS;
+
+    if (!host || !user || !pass) {
+      console.warn("Email configuration missing. Emails will not be sent.");
+      return null;
+    }
+
+    transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+    });
+  }
+  return transporter;
+}
 
 // Initialize Database
 db.exec(`
@@ -20,6 +46,7 @@ db.exec(`
     website TEXT,
     linkedin_url TEXT,
     enriched_at DATETIME,
+    assigned_to TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -61,6 +88,17 @@ db.exec(`
     PRIMARY KEY (lead_id, field_id),
     FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE,
     FOREIGN KEY (field_id) REFERENCES custom_field_definitions(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_id INTEGER,
+    user_email TEXT,
+    action TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
   );
 `);
 
@@ -115,11 +153,18 @@ async function startServer() {
   });
 
   app.post("/api/leads", (req, res) => {
-    const { name, company, email, status } = req.body;
+    const { name, company, email, status, user_email } = req.body;
     const info = db.prepare(
       "INSERT INTO leads (name, company, email, status) VALUES (?, ?, ?, ?)"
     ).run(name, company, email, status || 'New');
-    res.json({ id: info.lastInsertRowid });
+    const leadId = info.lastInsertRowid;
+    
+    if (user_email) {
+      db.prepare("INSERT INTO activity_logs (lead_id, user_email, action, new_value) VALUES (?, ?, ?, ?)")
+        .run(leadId, user_email, 'Lead Created', name);
+    }
+    
+    res.json({ id: leadId });
   });
 
   app.get("/api/leads/:id", (req, res) => {
@@ -133,17 +178,30 @@ async function startServer() {
       FROM custom_field_definitions d
       LEFT JOIN lead_custom_values v ON d.id = v.field_id AND v.lead_id = ?
     `).all(req.params.id);
+    const activityLogs = db.prepare("SELECT * FROM activity_logs WHERE lead_id = ? ORDER BY created_at DESC").all(req.params.id);
     
-    res.json({ ...lead, communications: comms, reminders, custom_fields: customValues });
+    res.json({ ...lead, communications: comms, reminders, custom_fields: customValues, activity_logs: activityLogs });
   });
 
   app.patch("/api/leads/:id", (req, res) => {
-    const { status, name, company, email, title, bio, website, linkedin_url, enriched_at } = req.body;
+    const { status, name, company, email, title, bio, website, linkedin_url, enriched_at, assigned_to, user_email } = req.body;
     const lead = db.prepare("SELECT * FROM leads WHERE id = ?").get(req.params.id);
     if (!lead) return res.status(404).json({ error: "Lead not found" });
 
+    // Log status change
+    if (status && status !== lead.status && user_email) {
+      db.prepare("INSERT INTO activity_logs (lead_id, user_email, action, old_value, new_value) VALUES (?, ?, ?, ?, ?)")
+        .run(req.params.id, user_email, 'Status Changed', lead.status, status);
+    }
+
+    // Log assignment change
+    if (assigned_to !== undefined && assigned_to !== lead.assigned_to && user_email) {
+      db.prepare("INSERT INTO activity_logs (lead_id, user_email, action, old_value, new_value) VALUES (?, ?, ?, ?, ?)")
+        .run(req.params.id, user_email, 'Lead Assigned', lead.assigned_to || 'Unassigned', assigned_to || 'Unassigned');
+    }
+
     db.prepare(
-      "UPDATE leads SET status = ?, name = ?, company = ?, email = ?, title = ?, bio = ?, website = ?, linkedin_url = ?, enriched_at = ? WHERE id = ?"
+      "UPDATE leads SET status = ?, name = ?, company = ?, email = ?, title = ?, bio = ?, website = ?, linkedin_url = ?, enriched_at = ?, assigned_to = ? WHERE id = ?"
     ).run(
       status ?? lead.status,
       name ?? lead.name,
@@ -154,6 +212,7 @@ async function startServer() {
       website ?? lead.website,
       linkedin_url ?? lead.linkedin_url,
       enriched_at ?? lead.enriched_at,
+      assigned_to ?? lead.assigned_to,
       req.params.id
     );
     res.json({ success: true });
@@ -191,8 +250,53 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  app.post("/api/send-email", async (req, res) => {
+    const { lead_id, to, subject, content, user_email } = req.body;
+    
+    const mailTransporter = getTransporter();
+    if (!mailTransporter) {
+      return res.status(503).json({ error: "Email service not configured" });
+    }
+
+    try {
+      await mailTransporter.sendMail({
+        from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+        to,
+        subject,
+        text: content,
+        html: content.replace(/\n/g, '<br>'),
+      });
+
+      // Log as communication
+      const info = db.prepare(
+        "INSERT INTO communications (lead_id, type, content) VALUES (?, ?, ?)"
+      ).run(lead_id, 'Email', content);
+
+      // Log activity
+      if (user_email) {
+        db.prepare("INSERT INTO activity_logs (lead_id, user_email, action, new_value) VALUES (?, ?, ?, ?)")
+          .run(lead_id, user_email, 'Email Sent', `To: ${to}`);
+      }
+
+      res.json({ success: true, id: info.lastInsertRowid });
+    } catch (error: any) {
+      console.error("Failed to send email:", error);
+      res.status(500).json({ error: "Failed to send email: " + error.message });
+    }
+  });
+
   app.post("/api/leads/:id/custom-values", (req, res) => {
-    const { field_id, value } = req.body;
+    const { field_id, value, user_email } = req.body;
+    
+    // Get old value for logging
+    const oldVal = db.prepare("SELECT value FROM lead_custom_values WHERE lead_id = ? AND field_id = ?").get(req.params.id, field_id);
+    const fieldDef = db.prepare("SELECT label FROM custom_field_definitions WHERE id = ?").get(field_id);
+
+    if (user_email && oldVal?.value !== value) {
+      db.prepare("INSERT INTO activity_logs (lead_id, user_email, action, old_value, new_value) VALUES (?, ?, ?, ?, ?)")
+        .run(req.params.id, user_email, `Field Updated: ${fieldDef.label}`, oldVal?.value || 'None', value || 'None');
+    }
+
     db.prepare(`
       INSERT INTO lead_custom_values (lead_id, field_id, value) 
       VALUES (?, ?, ?)

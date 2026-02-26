@@ -22,11 +22,14 @@ import {
   Sparkles,
   Globe,
   Linkedin,
-  Loader2
+  Loader2,
+  Send
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import ReactQuill from 'react-quill-new';
+import 'react-quill-new/dist/quill.snow.css';
 import { GoogleGenAI, Type } from "@google/genai";
-import { Lead, LeadDetail, Communication, Reminder, Template } from './types';
+import { Lead, LeadDetail, Communication, Reminder, Template, CustomFieldDefinition } from './types';
 
 const STATUS_COLORS = {
   'New': 'bg-blue-100 text-blue-700 border-blue-200',
@@ -45,13 +48,20 @@ export default function App() {
   const [isManagingTemplates, setIsManagingTemplates] = useState(false);
   const [isManagingFields, setIsManagingFields] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
+  const [isScrapingLinkedIn, setIsScrapingLinkedIn] = useState(false);
   const [isGeneratingTemplate, setIsGeneratingTemplate] = useState(false);
+  const [isGeneratingSubject, setIsGeneratingSubject] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'History' | 'Reminders' | 'Custom' | 'Activity'>('History');
   const [searchQuery, setSearchQuery] = useState('');
-  const [newComm, setNewComm] = useState({ type: 'Note', content: '' });
+  const [newComm, setNewComm] = useState({ type: 'Note', content: '', subject: '' });
   const [newLead, setNewLead] = useState({ name: '', company: '', email: '', status: 'New' as Lead['status'] });
   const [newReminder, setNewReminder] = useState({ task: '', due_at: '' });
   const [newTemplate, setNewTemplate] = useState({ name: '', content: '' });
   const [newFieldName, setNewFieldName] = useState('');
+
+  const USER_EMAIL = 'ivucicev@gmail.com';
 
   useEffect(() => {
     fetchLeads();
@@ -137,12 +147,58 @@ export default function App() {
     }
   };
 
+  const handleLinkedInScrape = async () => {
+    if (!leadDetail) return;
+    setIsScrapingLinkedIn(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Search for the LinkedIn profile of ${leadDetail.name} at ${leadDetail.company}. 
+        Extract their current professional title, a summary of their background (bio), their company's website, and the exact LinkedIn URL.`,
+        config: {
+          tools: [{ googleSearch: {} }],
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              bio: { type: Type.STRING },
+              website: { type: Type.STRING },
+              linkedin_url: { type: Type.STRING }
+            },
+            required: ["linkedin_url"]
+          }
+        }
+      });
+
+      const scrapedData = JSON.parse(response.text || "{}");
+      
+      await fetch(`/api/leads/${leadDetail.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...scrapedData,
+          enriched_at: new Date().toISOString()
+        }),
+      });
+
+      fetchLeadDetail(leadDetail.id);
+      fetchLeads();
+    } catch (error) {
+      console.error("LinkedIn scrape failed:", error);
+      alert("Failed to find LinkedIn data.");
+    } finally {
+      setIsScrapingLinkedIn(false);
+    }
+  };
+
   const handleAddLead = async (e: React.FormEvent) => {
     e.preventDefault();
     await fetch('/api/leads', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newLead),
+      body: JSON.stringify({ ...newLead, user_email: USER_EMAIL }),
     });
     setIsAddingLead(false);
     setNewLead({ name: '', company: '', email: '', status: 'New' });
@@ -155,10 +211,42 @@ export default function App() {
     await fetch(`/api/leads/${selectedLeadId}/communications`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newComm),
+      body: JSON.stringify({ type: newComm.type, content: newComm.content }),
     });
-    setNewComm({ type: 'Note', content: '' });
+    setNewComm({ type: 'Note', content: '', subject: '' });
     fetchLeadDetail(selectedLeadId);
+  };
+
+  const handleSendEmail = async () => {
+    if (!leadDetail || !newComm.content || !newComm.subject) return;
+    setIsSendingEmail(true);
+    try {
+      const res = await fetch('/api/send-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lead_id: leadDetail.id,
+          to: leadDetail.email,
+          subject: newComm.subject,
+          content: newComm.content,
+          user_email: USER_EMAIL
+        }),
+      });
+      
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to send email');
+      }
+      
+      alert("Email sent successfully!");
+      setNewComm({ type: 'Note', content: '', subject: '' });
+      fetchLeadDetail(leadDetail.id);
+    } catch (error: any) {
+      console.error("Send failed:", error);
+      alert(error.message);
+    } finally {
+      setIsSendingEmail(false);
+    }
   };
 
   const handleGenerateTemplate = async () => {
@@ -186,12 +274,34 @@ export default function App() {
     }
   };
 
+  const handleGenerateSubject = async () => {
+    if (!leadDetail || !newComm.content) return;
+    setIsGeneratingSubject(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Based on the following email content and lead company, generate a single compelling email subject line.
+        Company: ${leadDetail.company}
+        Email Content: ${newComm.content}
+        
+        Return ONLY the subject line text.`,
+      });
+      
+      setNewComm(prev => ({ ...prev, subject: response.text?.trim() || prev.subject }));
+    } catch (error) {
+      console.error("Subject generation failed:", error);
+    } finally {
+      setIsGeneratingSubject(false);
+    }
+  };
+
   const handleUpdateCustomValue = async (fieldId: number, value: string) => {
     if (!selectedLeadId) return;
     await fetch(`/api/leads/${selectedLeadId}/custom-values`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ field_id: fieldId, value }),
+      body: JSON.stringify({ field_id: fieldId, value, user_email: USER_EMAIL }),
     });
   };
 
@@ -263,9 +373,18 @@ export default function App() {
     await fetch(`/api/leads/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status, user_email: USER_EMAIL }),
     });
     fetchLeads();
+    if (selectedLeadId === id) fetchLeadDetail(id);
+  };
+
+  const handleUpdateAssignment = async (id: number, assigned_to: string) => {
+    await fetch(`/api/leads/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assigned_to, user_email: USER_EMAIL }),
+    });
     if (selectedLeadId === id) fetchLeadDetail(id);
   };
 
@@ -399,6 +518,27 @@ export default function App() {
                         {isEnriching ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
                         {isEnriching ? 'Enriching...' : 'Enrich Lead'}
                       </button>
+                      <button
+                        onClick={handleLinkedInScrape}
+                        disabled={isScrapingLinkedIn}
+                        className="flex items-center gap-1.5 px-3 py-1 bg-blue-50 text-blue-600 border border-blue-100 rounded-full text-xs font-bold hover:bg-blue-100 transition-all disabled:opacity-50"
+                      >
+                        {isScrapingLinkedIn ? <Loader2 className="w-3 h-3 animate-spin" /> : <Linkedin className="w-3 h-3" />}
+                        {isScrapingLinkedIn ? 'Scraping...' : 'LinkedIn Scrape'}
+                      </button>
+                      <div className="flex items-center gap-2 ml-auto">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">Assigned To</span>
+                        <select 
+                          value={leadDetail.assigned_to || ''}
+                          onChange={(e) => handleUpdateAssignment(leadDetail.id, e.target.value)}
+                          className="text-xs px-3 py-1 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-crimson-500/20"
+                        >
+                          <option value="">Unassigned</option>
+                          <option value="ivucicev@gmail.com">Me</option>
+                          <option value="sales@crimson.com">Sales Team</option>
+                          <option value="support@crimson.com">Support</option>
+                        </select>
+                      </div>
                     </div>
                     
                     {leadDetail.title && (
@@ -441,198 +581,283 @@ export default function App() {
                   </button>
                 </div>
 
+                {/* Tabs */}
+                <div className="flex border-b border-slate-100 px-6 bg-white">
+                  {['History', 'Reminders', 'Custom', 'Activity'].map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setActiveTab(tab as any)}
+                      className={`px-4 py-3 text-xs font-bold transition-all border-b-2 -mb-px ${activeTab === tab ? 'border-crimson-600 text-crimson-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+
                 {/* Content Tabs/Sections */}
-                <div className="flex-1 overflow-y-auto p-6 bg-slate-50/30 grid grid-cols-2 gap-6">
-                  {/* Communication Log */}
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-sm font-bold text-ink flex items-center gap-2">
-                        <MessageSquare className="w-4 h-4 text-crimson-500" />
-                        Communication History
-                      </h3>
-                    </div>
+                <div className="flex-1 overflow-y-auto p-6 bg-slate-50/30">
+                  {activeTab === 'History' && (
+                    <div className="max-w-3xl mx-auto space-y-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-ink flex items-center gap-2">
+                          <MessageSquare className="w-4 h-4 text-crimson-500" />
+                          Communication History
+                        </h3>
+                      </div>
 
-                    {/* Add Comm Form */}
-                    <form onSubmit={handleAddComm} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-8">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex gap-2">
-                          {['Note', 'Email', 'Call'].map(type => (
-                            <button
-                              key={type}
-                              type="button"
-                              onClick={() => setNewComm(prev => ({ ...prev, type }))}
-                              className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${newComm.type === type ? 'bg-crimson-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                            >
-                              {type}
-                            </button>
-                          ))}
-                        </div>
-                        {newComm.type === 'Email' && templates.length > 0 && (
-                          <select 
-                            onChange={(e) => {
-                              const template = templates.find(t => t.id === Number(e.target.value));
-                              if (template) setNewComm(prev => ({ ...prev, content: template.content }));
-                            }}
-                            className="text-[10px] px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-1 focus:ring-crimson-500"
-                          >
-                            <option value="">Apply Template...</option>
-                            {templates.map(t => (
-                              <option key={t.id} value={t.id}>{t.name}</option>
+                      {/* Add Comm Form */}
+                      <form onSubmit={handleAddComm} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-8">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex gap-2">
+                            {['Note', 'Email', 'Call'].map(type => (
+                              <button
+                                key={type}
+                                type="button"
+                                onClick={() => setNewComm(prev => ({ ...prev, type, subject: type === 'Email' ? (prev.subject || 'Follow up from Crimson CRM') : '' }))}
+                                className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${newComm.type === type ? 'bg-crimson-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                              >
+                                {type}
+                              </button>
                             ))}
-                          </select>
-                        )}
-                      </div>
-                      <textarea
-                        placeholder="Log a new interaction..."
-                        className="w-full p-3 text-sm border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none min-h-[80px] resize-none"
-                        value={newComm.content}
-                        onChange={(e) => setNewComm(prev => ({ ...prev, content: e.target.value }))}
-                      />
-                      <div className="flex justify-between mt-3">
-                        <button 
-                          type="button"
-                          onClick={handleSaveTemplate}
-                          disabled={!newComm.content}
-                          className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 hover:text-crimson-600 transition-colors disabled:opacity-0"
-                        >
-                          <Save className="w-3 h-3" />
-                          Save as Template
-                        </button>
-                        <button 
-                          type="button"
-                          onClick={handleGenerateTemplate}
-                          disabled={isGeneratingTemplate}
-                          className="flex items-center gap-1.5 text-[10px] font-bold text-amber-500 hover:text-amber-600 transition-colors"
-                        >
-                          {isGeneratingTemplate ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                          AI Generate
-                        </button>
-                        <button 
-                          type="submit"
-                          disabled={!newComm.content}
-                          className="bg-ink text-white px-4 py-1.5 rounded-lg text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-all"
-                        >
-                          Log Activity
-                        </button>
-                      </div>
-                    </form>
-
-                    {/* History List */}
-                    <div className="space-y-4">
-                      {leadDetail.communications.map(comm => (
-                        <div key={comm.id} className="flex gap-4 group">
-                          <div className="flex flex-col items-center">
-                            <div className={`w-8 h-8 rounded-full flex items-center justify-center border ${
-                              comm.type === 'Call' ? 'bg-blue-50 border-blue-100 text-blue-600' :
-                              comm.type === 'Email' ? 'bg-purple-50 border-purple-100 text-purple-600' :
-                              'bg-slate-50 border-slate-100 text-slate-600'
-                            }`}>
-                              {comm.type === 'Call' ? <Phone className="w-4 h-4" /> :
-                               comm.type === 'Email' ? <Mail className="w-4 h-4" /> :
-                               <MessageSquare className="w-4 h-4" />}
-                            </div>
-                            <div className="w-px flex-1 bg-slate-200 my-1 group-last:hidden" />
                           </div>
-                          <div className="flex-1 pb-6">
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="text-xs font-bold text-ink">{comm.type}</span>
-                              <span className="text-[10px] text-slate-400">{new Date(comm.created_at).toLocaleString()}</span>
-                            </div>
-                            <p className="text-sm text-slate-600 leading-relaxed">{comm.content}</p>
-                          </div>
+                          {newComm.type === 'Email' && templates.length > 0 && (
+                            <select 
+                              onChange={(e) => {
+                                const template = templates.find(t => t.id === Number(e.target.value));
+                                if (template) setNewComm(prev => ({ ...prev, content: template.content }));
+                              }}
+                              className="text-[10px] px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-1 focus:ring-crimson-500"
+                            >
+                              <option value="">Apply Template...</option>
+                              {templates.map(t => (
+                                <option key={t.id} value={t.id}>{t.name}</option>
+                              ))}
+                            </select>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Reminders Section */}
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-sm font-bold text-ink flex items-center gap-2">
-                        <Bell className="w-4 h-4 text-amber-500" />
-                        Tasks & Reminders
-                      </h3>
-                    </div>
-
-                    {/* Add Reminder Form */}
-                    <form onSubmit={handleAddReminder} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-8">
-                      <div className="space-y-3">
-                        <input
-                          type="text"
-                          placeholder="What needs to be done?"
-                          className="w-full p-2.5 text-sm border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none"
-                          value={newReminder.task}
-                          onChange={(e) => setNewReminder(prev => ({ ...prev, task: e.target.value }))}
-                        />
-                        <div className="flex gap-2">
-                          <div className="relative flex-1">
-                            <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        
+                        {newComm.type === 'Email' && (
+                          <div className="relative mb-3">
                             <input
-                              type="datetime-local"
-                              className="w-full pl-9 pr-2.5 py-2 text-xs border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 outline-none"
-                              value={newReminder.due_at}
-                              onChange={(e) => setNewReminder(prev => ({ ...prev, due_at: e.target.value }))}
+                              type="text"
+                              placeholder="Email Subject"
+                              className="w-full pl-3 pr-24 py-2 text-sm border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none"
+                              value={newComm.subject}
+                              onChange={(e) => setNewComm(prev => ({ ...prev, subject: e.target.value }))}
+                            />
+                            <button
+                              type="button"
+                              onClick={handleGenerateSubject}
+                              disabled={isGeneratingSubject || !newComm.content}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 text-[10px] font-bold text-amber-500 hover:text-amber-600 disabled:opacity-50"
+                            >
+                              {isGeneratingSubject ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                              Suggest
+                            </button>
+                          </div>
+                        )}
+
+                        {newComm.type === 'Email' ? (
+                          <div className="mb-4">
+                            <ReactQuill 
+                              theme="snow"
+                              value={newComm.content}
+                              onChange={(content) => setNewComm(prev => ({ ...prev, content }))}
+                              placeholder="Compose your email..."
+                              className="bg-white rounded-lg overflow-hidden border border-slate-100"
+                              modules={{
+                                toolbar: [
+                                  [{ 'header': [1, 2, false] }],
+                                  ['bold', 'italic', 'underline', 'strike', 'blockquote'],
+                                  [{'list': 'ordered'}, {'list': 'bullet'}, {'indent': '-1'}, {'indent': '+1'}],
+                                  ['link'],
+                                  ['clean']
+                                ],
+                              }}
                             />
                           </div>
-                          <button 
-                            type="submit"
-                            disabled={!newReminder.task || !newReminder.due_at}
-                            className="bg-amber-500 text-white px-4 py-2 rounded-lg text-xs font-medium hover:bg-amber-600 disabled:opacity-50 transition-all"
-                          >
-                            Add
-                          </button>
-                        </div>
-                      </div>
-                    </form>
+                        ) : (
+                          <textarea
+                            placeholder="Log a new interaction..."
+                            className="w-full p-3 text-sm border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none min-h-[80px] resize-none mb-4"
+                            value={newComm.content}
+                            onChange={(e) => setNewComm(prev => ({ ...prev, content: e.target.value }))}
+                          />
+                        )}
 
-                    {/* Reminders List */}
-                    <div className="space-y-3">
-                      {leadDetail.reminders.map(reminder => (
-                        <div 
-                          key={reminder.id} 
-                          className={`p-3 rounded-xl border flex items-start gap-3 transition-all ${
-                            reminder.completed ? 'bg-slate-50 border-slate-100 opacity-60' : 'bg-white border-slate-200 shadow-sm'
-                          }`}
-                        >
-                          <button 
-                            onClick={() => handleToggleReminder(reminder.id, !reminder.completed)}
-                            className={`mt-0.5 transition-colors ${reminder.completed ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
-                          >
-                            {reminder.completed ? <CheckCircle className="w-5 h-5" /> : <div className="w-5 h-5 rounded-full border-2 border-current" />}
-                          </button>
-                          <div className="flex-1 min-w-0">
-                            <p className={`text-sm font-medium ${reminder.completed ? 'line-through text-slate-400' : 'text-ink'}`}>
-                              {reminder.task}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1">
-                              <Clock className={`w-3 h-3 ${new Date(reminder.due_at) < new Date() && !reminder.completed ? 'text-red-500' : 'text-slate-400'}`} />
-                              <span className={`text-[10px] ${new Date(reminder.due_at) < new Date() && !reminder.completed ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
-                                {new Date(reminder.due_at).toLocaleString()}
-                              </span>
+                        <div className="flex justify-between mt-3">
+                          <div className="flex gap-3">
+                            <button 
+                              type="button"
+                              onClick={handleSaveTemplate}
+                              disabled={!newComm.content}
+                              className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 hover:text-crimson-600 transition-colors disabled:opacity-0"
+                            >
+                              <Save className="w-3 h-3" />
+                              Save as Template
+                            </button>
+                            <button 
+                              type="button"
+                              onClick={handleGenerateTemplate}
+                              disabled={isGeneratingTemplate}
+                              className="flex items-center gap-1.5 text-[10px] font-bold text-amber-500 hover:text-amber-600 transition-colors"
+                            >
+                              {isGeneratingTemplate ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                              AI Generate
+                            </button>
+                            {newComm.type === 'Email' && (
+                              <button 
+                                type="button"
+                                onClick={() => setIsPreviewOpen(true)}
+                                disabled={!newComm.content}
+                                className="flex items-center gap-1.5 text-[10px] font-bold text-blue-500 hover:text-blue-600 transition-colors"
+                              >
+                                <FileText className="w-3 h-3" />
+                                Preview
+                              </button>
+                            )}
+                          </div>
+                          
+                          <div className="flex gap-2">
+                            {newComm.type === 'Email' && (
+                              <button 
+                                type="button"
+                                onClick={handleSendEmail}
+                                disabled={!newComm.content || !newComm.subject || isSendingEmail}
+                                className="bg-crimson-600 text-white px-4 py-1.5 rounded-lg text-xs font-bold hover:bg-crimson-700 disabled:opacity-50 transition-all flex items-center gap-2"
+                              >
+                                {isSendingEmail ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
+                                Send Email
+                              </button>
+                            )}
+                            <button 
+                              type="submit"
+                              disabled={!newComm.content}
+                              className="bg-ink text-white px-4 py-1.5 rounded-lg text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-all"
+                            >
+                              Log Activity
+                            </button>
+                          </div>
+                        </div>
+                      </form>
+
+                      {/* History List */}
+                      <div className="space-y-4">
+                        {leadDetail.communications.map(comm => (
+                          <div key={comm.id} className="flex gap-4 group">
+                            <div className="flex flex-col items-center">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center border ${
+                                comm.type === 'Call' ? 'bg-blue-50 border-blue-100 text-blue-600' :
+                                comm.type === 'Email' ? 'bg-purple-50 border-purple-100 text-purple-600' :
+                                'bg-slate-50 border-slate-100 text-slate-600'
+                              }`}>
+                                {comm.type === 'Call' ? <Phone className="w-4 h-4" /> :
+                                 comm.type === 'Email' ? <Mail className="w-4 h-4" /> :
+                                 <MessageSquare className="w-4 h-4" />}
+                              </div>
+                              <div className="w-px flex-1 bg-slate-200 my-1 group-last:hidden" />
+                            </div>
+                            <div className="flex-1 pb-6">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-bold text-ink">{comm.type}</span>
+                                <span className="text-[10px] text-slate-400">{new Date(comm.created_at).toLocaleString()}</span>
+                              </div>
+                              <p className="text-sm text-slate-600 leading-relaxed">{comm.content}</p>
                             </div>
                           </div>
-                          <button 
-                            onClick={() => handleDeleteReminder(reminder.id)}
-                            className="text-slate-300 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
-                      {leadDetail.reminders.length === 0 && (
-                        <div className="text-center py-8 text-slate-400">
-                          <p className="text-sm italic">No reminders set.</p>
-                        </div>
-                      )}
+                        ))}
+                      </div>
                     </div>
+                  )}
 
-                    {/* Custom Fields Section */}
-                    <div className="pt-6 border-t border-slate-100">
-                      <h3 className="text-sm font-bold text-ink flex items-center gap-2 mb-4">
-                        <Plus className="w-4 h-4 text-emerald-500" />
-                        Custom Fields
-                      </h3>
-                      <div className="space-y-4">
+                  {activeTab === 'Reminders' && (
+                    <div className="max-w-2xl mx-auto space-y-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-ink flex items-center gap-2">
+                          <Bell className="w-4 h-4 text-amber-500" />
+                          Tasks & Reminders
+                        </h3>
+                      </div>
+
+                      {/* Add Reminder Form */}
+                      <form onSubmit={handleAddReminder} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-8">
+                        <div className="space-y-3">
+                          <input
+                            type="text"
+                            placeholder="What needs to be done?"
+                            className="w-full p-2.5 text-sm border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 focus:border-crimson-500 outline-none"
+                            value={newReminder.task}
+                            onChange={(e) => setNewReminder(prev => ({ ...prev, task: e.target.value }))}
+                          />
+                          <div className="flex gap-2">
+                            <div className="relative flex-1">
+                              <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                              <input
+                                type="datetime-local"
+                                className="w-full pl-9 pr-2.5 py-2 text-xs border border-slate-100 rounded-lg focus:ring-2 focus:ring-crimson-500/20 outline-none"
+                                value={newReminder.due_at}
+                                onChange={(e) => setNewReminder(prev => ({ ...prev, due_at: e.target.value }))}
+                              />
+                            </div>
+                            <button type="submit" className="bg-ink text-white px-6 py-2 rounded-lg text-xs font-bold hover:bg-slate-800 transition-all">
+                              Add Task
+                            </button>
+                          </div>
+                        </div>
+                      </form>
+
+                      {/* Reminder List */}
+                      <div className="space-y-3">
+                        {leadDetail.reminders.map(reminder => (
+                          <div 
+                            key={reminder.id} 
+                            className={`p-3 rounded-xl border flex items-start gap-3 transition-all ${
+                              reminder.completed ? 'bg-slate-50 border-slate-100 opacity-60' : 'bg-white border-slate-200 shadow-sm'
+                            }`}
+                          >
+                            <button 
+                              onClick={() => handleToggleReminder(reminder.id, !reminder.completed)}
+                              className={`mt-0.5 transition-colors ${reminder.completed ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
+                            >
+                              {reminder.completed ? <CheckCircle className="w-5 h-5" /> : <div className="w-5 h-5 rounded-full border-2 border-current" />}
+                            </button>
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-sm font-medium ${reminder.completed ? 'line-through text-slate-400' : 'text-ink'}`}>
+                                {reminder.task}
+                              </p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <Clock className={`w-3 h-3 ${new Date(reminder.due_at) < new Date() && !reminder.completed ? 'text-red-500' : 'text-slate-400'}`} />
+                                <span className={`text-[10px] ${new Date(reminder.due_at) < new Date() && !reminder.completed ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
+                                  {new Date(reminder.due_at).toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={() => handleDeleteReminder(reminder.id)}
+                              className="text-slate-300 hover:text-red-500 transition-colors"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                        {leadDetail.reminders.length === 0 && (
+                          <div className="text-center py-12 text-slate-400">
+                            <p className="text-sm italic">No reminders set for this lead.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {activeTab === 'Custom' && (
+                    <div className="max-w-2xl mx-auto space-y-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-ink flex items-center gap-2">
+                          <Plus className="w-4 h-4 text-emerald-500" />
+                          Custom Fields
+                        </h3>
+                      </div>
+                      <div className="grid grid-cols-1 gap-6 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
                         {leadDetail.custom_fields.map(field => (
                           <div key={field.field_id}>
                             <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">{field.label}</label>
@@ -640,17 +865,60 @@ export default function App() {
                               type="text"
                               defaultValue={field.value || ''}
                               onBlur={(e) => handleUpdateCustomValue(field.field_id, e.target.value)}
-                              className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-crimson-500/20 outline-none"
+                              className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-crimson-500/20 outline-none"
                               placeholder={`Enter ${field.label}...`}
                             />
                           </div>
                         ))}
                         {leadDetail.custom_fields.length === 0 && (
-                          <p className="text-xs text-slate-400 italic">No custom fields defined. Click the + icon in the header to add some.</p>
+                          <div className="text-center py-8 text-slate-400">
+                            <p className="text-xs italic">No custom fields defined. Click the + icon in the header to add some.</p>
+                          </div>
                         )}
                       </div>
                     </div>
-                  </div>
+                  )}
+
+                  {activeTab === 'Activity' && (
+                    <div className="max-w-2xl mx-auto space-y-4">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-ink flex items-center gap-2">
+                          <Clock className="w-4 h-4 text-crimson-600" />
+                          Activity Log
+                        </h3>
+                      </div>
+                      {leadDetail.activity_logs.map(log => (
+                        <div key={log.id} className="p-4 rounded-xl border border-slate-100 bg-white shadow-sm">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-bold text-crimson-600">{log.action}</span>
+                            <span className="text-[10px] text-slate-400">{new Date(log.created_at).toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-slate-600 mb-2">
+                            <span className="font-medium text-ink">{log.user_email}</span>
+                            <span>made a change</span>
+                          </div>
+                          {log.old_value && (
+                            <div className="flex items-center gap-2 text-[10px] bg-slate-50 p-2 rounded-lg">
+                              <span className="text-slate-400 line-through">{log.old_value}</span>
+                              <ChevronRight className="w-3 h-3 text-slate-300" />
+                              <span className="text-ink font-bold">{log.new_value}</span>
+                            </div>
+                          )}
+                          {!log.old_value && log.new_value && (
+                            <div className="text-[10px] bg-slate-50 p-2 rounded-lg">
+                              <span className="text-slate-400 mr-1">Value:</span>
+                              <span className="text-ink font-bold">{log.new_value}</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {leadDetail.activity_logs.length === 0 && (
+                        <div className="text-center py-12 text-slate-400">
+                          <p className="text-sm italic">No activity recorded yet.</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </motion.div>
             ) : (

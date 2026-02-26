@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  --color-crimson-50: #fff1f2;
+  --color-crimson-100: #ffe4e6;
+  --color-crimson-200: #fecdd3;
+  --color-crimson-300: #fda4af;
+  --color-crimson-400: #fb7185;
+  --color-crimson-500: #f43f5e;
+  --color-crimson-600: #9f1239;
+  --color-crimson-700: #881337;
+  --color-crimson-800: #4c0519;
+  --color-crimson-900: #310411;
+  
+  --color-paper: #fcfcfb;
+  --color-ink: #1a1a1a;
+}
+
+@layer base {
+  body {
+    @apply bg-paper text-ink antialiased;
+  }
+}
+

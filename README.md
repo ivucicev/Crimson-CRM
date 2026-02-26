@@ -1,20 +1,53 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Crimson CRM
 
-# Run and deploy your AI Studio app
+Crimson CRM helps sales teams move faster from first contact to closed opportunity.
+Track leads, enrich profiles, generate outreach, and manage follow-ups from one clean workspace.
 
-This contains everything you need to run your app locally.
+## Product Screenshot
 
-View your app in AI Studio: https://ai.studio/apps/3888a350-90fb-4f78-83a2-8347e4ab27a0
+Add your screenshot here:
 
-## Run Locally
+`docs/product-screenshot.png`
 
-**Prerequisites:**  Node.js
+```md
+![Crimson CRM Dashboard](docs/product-screenshot.png)
+```
 
+## Why Crimson CRM
+
+- Keep every lead organized with status, ownership, and activity history.
+- Capture communication context in one timeline (email, notes, reminders).
+- Speed up outbound with AI-assisted lead enrichment and email drafting.
+- Customize lead data with your own fields as your process evolves.
+
+## Core Features
+
+- Lead management with searchable pipeline states.
+- Contact profile view with company, website, and LinkedIn details.
+- Built-in reminder system for follow-ups.
+- Activity log for accountability and collaboration.
+- Email sending and communication tracking.
+- AI-assisted enrichment, subject line generation, and message drafting.
+
+## Quick Start
+
+Prerequisite: Node.js 18+
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Configure environment variables in `.env.local` (use `.env.example` as reference), including:
+   `GEMINI_API_KEY`
+3. Start the app:
    `npm run dev`
+4. Open the local URL shown in your terminal.
+
+## Tech Stack
+
+- React + TypeScript + Vite
+- Express API server
+- SQLite (better-sqlite3)
+- Tailwind CSS
+
+## Positioning
+
+Crimson CRM is ideal for small sales teams that need speed, clarity, and lightweight workflow automation without enterprise CRM complexity.

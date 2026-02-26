@@ -135,7 +135,6 @@ async function startServer() {
         },
         body: JSON.stringify({
           model,
-          temperature: 0.2,
           messages: [
             {
               role: "system",

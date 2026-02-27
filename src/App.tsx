@@ -57,6 +57,9 @@ export default function App() {
   const [isEditingLead, setIsEditingLead] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isResearchReviewOpen, setIsResearchReviewOpen] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<'crm' | 'registry'>('crm');
+  const [isSearchingCroatiaCompanies, setIsSearchingCroatiaCompanies] = useState(false);
+  const [isSyncingCroatiaCompanies, setIsSyncingCroatiaCompanies] = useState(false);
   const [activeTab, setActiveTab] = useState<'History' | 'Contacts' | 'Reminders' | 'Custom' | 'Activity'>('History');
   const [searchQuery, setSearchQuery] = useState('');
   const [newComm, setNewComm] = useState({ type: 'Note', content: '', subject: '' });
@@ -76,6 +79,37 @@ export default function App() {
   const [newFieldName, setNewFieldName] = useState('');
   const [researchRunId, setResearchRunId] = useState('');
   const [researchCandidates, setResearchCandidates] = useState<(ResearchCandidate & { selected: boolean })[]>([]);
+  const [croatiaCompanyQuery, setCroatiaCompanyQuery] = useState('');
+  const [croatiaCompanyResults, setCroatiaCompanyResults] = useState<Array<{
+    name: string;
+    oib?: string;
+    mbs?: string;
+    court?: string;
+    city?: string;
+    status?: string;
+    website?: string;
+  }>>([]);
+  const [croatiaNkds, setCroatiaNkds] = useState<Array<{ code: string; name?: string }>>([]);
+  const [croatiaNkdQuery, setCroatiaNkdQuery] = useState('');
+  const [selectedCroatiaNkds, setSelectedCroatiaNkds] = useState<string[]>([]);
+  const [selectedCroatiaNkdMode, setSelectedCroatiaNkdMode] = useState<'any' | 'primary' | 'secondary'>('any');
+  const [selectedCroatiaCity, setSelectedCroatiaCity] = useState('');
+  const [selectedCroatiaRegion, setSelectedCroatiaRegion] = useState('');
+  const [isLoadingCompanyDetail, setIsLoadingCompanyDetail] = useState(false);
+  const [selectedRegistryMbs, setSelectedRegistryMbs] = useState<string>('');
+  const [registryDetailError, setRegistryDetailError] = useState<string | null>(null);
+  const [selectedCompanyDetail, setSelectedCompanyDetail] = useState<any>(null);
+  const [croatiaSyncStatus, setCroatiaSyncStatus] = useState<{
+    running: boolean;
+    currentPage: number;
+    processedCompanies: number;
+    importedCompanies: number;
+    skippedCompanies?: number;
+    cachedCompanies: number;
+    cachedNkds?: number;
+    importedNkds?: number;
+    lastError: string | null;
+  } | null>(null);
 
   const USER_EMAIL = 'ivucicev@gmail.com';
 
@@ -93,6 +127,53 @@ export default function App() {
       setLeadDetail(null);
     }
   }, [selectedLeadId]);
+
+  useEffect(() => {
+    if (workspaceMode !== 'registry') return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/registry/hr/sync/status');
+        const data = await res.json();
+        if (cancelled) return;
+        setCroatiaSyncStatus(data);
+        setIsSyncingCroatiaCompanies(!!data.running);
+      } catch {
+        // Ignore transient polling errors in UI loop.
+      }
+    };
+
+    poll();
+    fetch('/api/registry/hr/nkds?limit=150')
+      .then((r) => r.json())
+      .then((data) => setCroatiaNkds(data.results || []))
+      .catch(() => {});
+    timer = setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [workspaceMode]);
+
+  useEffect(() => {
+    if (workspaceMode !== 'registry') return;
+    if (!croatiaCompanyResults.length) {
+      setSelectedRegistryMbs('');
+      setSelectedCompanyDetail(null);
+      return;
+    }
+    const hasSelected = selectedRegistryMbs && croatiaCompanyResults.some((c) => c.mbs === selectedRegistryMbs);
+    if (!hasSelected) {
+      const firstMbs = croatiaCompanyResults[0]?.mbs || '';
+      if (firstMbs) {
+        setSelectedRegistryMbs(firstMbs);
+        handleOpenCompanyDetail(firstMbs);
+      }
+    }
+  }, [workspaceMode, croatiaCompanyResults]);
 
   const fetchLeads = async () => {
     const res = await fetch('/api/leads');
@@ -257,6 +338,103 @@ If linkedin_url is unknown, set it to an empty string.`,
     await handleResearchCompanyContacts(created.companyId);
     fetchLeadDetail(created.leadId);
     fetchCompanies();
+  };
+
+  const handleSearchCroatiaCompanies = async () => {
+    const query = croatiaCompanyQuery.trim();
+    const city = selectedCroatiaCity.trim();
+    const region = selectedCroatiaRegion.trim();
+    setIsSearchingCroatiaCompanies(true);
+    try {
+      const params = new URLSearchParams();
+      if (query) params.set('q', query);
+      if (selectedCroatiaNkds.length) params.set('nkd_codes', selectedCroatiaNkds.join(','));
+      if (selectedCroatiaNkds.length) params.set('nkd_mode', selectedCroatiaNkdMode);
+      if (city) params.set('city', city);
+      if (region) params.set('region', region);
+      params.set('limit', '100');
+      const res = await fetch(`/api/registry/hr/companies/search?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Croatia company search failed');
+      setCroatiaCompanyResults(data.results || []);
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setIsSearchingCroatiaCompanies(false);
+    }
+  };
+
+  useEffect(() => {
+    if (workspaceMode !== 'registry') return;
+    const timeout = setTimeout(() => {
+      handleSearchCroatiaCompanies();
+    }, 180);
+    return () => clearTimeout(timeout);
+  }, [workspaceMode, croatiaCompanyQuery, selectedCroatiaCity, selectedCroatiaRegion, selectedCroatiaNkds.join('|'), selectedCroatiaNkdMode]);
+
+  useEffect(() => {
+    if (workspaceMode !== 'registry') return;
+    const timeout = setTimeout(() => {
+      const params = new URLSearchParams();
+      if (croatiaNkdQuery.trim()) params.set('q', croatiaNkdQuery.trim());
+      params.set('limit', '300');
+      fetch(`/api/registry/hr/nkds?${params.toString()}`)
+        .then((r) => r.json())
+        .then((data) => setCroatiaNkds(data.results || []))
+        .catch(() => {});
+    }, 180);
+    return () => clearTimeout(timeout);
+  }, [workspaceMode, croatiaNkdQuery]);
+
+  const handleStartCroatiaSync = async () => {
+    try {
+      const res = await fetch('/api/registry/hr/sync/start', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start Sudreg sync');
+      setCroatiaSyncStatus(data.state || null);
+      setIsSyncingCroatiaCompanies(true);
+    } catch (error: any) {
+      alert(error.message);
+    }
+  };
+
+  const handleImportCroatiaCompany = async (candidate: {
+    name: string;
+    oib?: string;
+    mbs?: string;
+    website?: string;
+  }) => {
+    const res = await fetch('/api/registry/hr/companies/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(candidate),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Failed to import company');
+      return;
+    }
+    setSelectedLeadId(data.lead_id);
+    fetchLeads();
+    fetchCompanies();
+    alert('Company imported to CRM.');
+  };
+
+  const handleOpenCompanyDetail = async (mbs?: string) => {
+    if (!mbs) return;
+    setSelectedRegistryMbs(mbs);
+    setRegistryDetailError(null);
+    setIsLoadingCompanyDetail(true);
+    try {
+      const res = await fetch(`/api/registry/hr/companies/${encodeURIComponent(mbs)}/detail`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load company detail');
+      setSelectedCompanyDetail(data);
+    } catch (error: any) {
+      setRegistryDetailError(error.message);
+    } finally {
+      setIsLoadingCompanyDetail(false);
+    }
   };
 
   const handleResearchCompanyContacts = async (companyId: number) => {
@@ -525,6 +703,15 @@ If linkedin_url is unknown, set it to an empty string.`,
     l.email?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const fmtDate = (value?: string | null) => {
+    if (!value) return 'N/A';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString();
+  };
+
+  const renderValue = (value?: any) => (value === null || value === undefined || value === '' ? 'N/A' : String(value));
+
   return (
     <div className="min-h-screen bg-paper text-ink font-sans">
       {/* Header */}
@@ -534,56 +721,82 @@ If linkedin_url is unknown, set it to an empty string.`,
             <Users className="text-white w-5 h-5" />
           </div>
           <h1 className="text-xl font-bold tracking-tight text-ink">Crimson</h1>
+          <div className="ml-3 flex items-center gap-1 bg-slate-100 p-1 rounded-full">
+            <button
+              onClick={() => setWorkspaceMode('crm')}
+              className={`px-3 py-1 text-xs font-bold rounded-full ${workspaceMode === 'crm' ? 'bg-white text-ink shadow-sm' : 'text-slate-500'}`}
+            >
+              CRM
+            </button>
+            <button
+              onClick={() => setWorkspaceMode('registry')}
+              className={`px-3 py-1 text-xs font-bold rounded-full ${workspaceMode === 'registry' ? 'bg-white text-ink shadow-sm' : 'text-slate-500'}`}
+            >
+              Registry
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input 
-              type="text" 
-              placeholder="Search contacts..." 
-              className="pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-crimson-500 w-64 transition-all"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-          </div>
-          <button 
-            onClick={() => setIsAddingCompany(true)}
-            className="bg-crimson-600 hover:bg-crimson-700 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
-          >
-            <Plus className="w-4 h-4" />
-            Add Company
-          </button>
-          <button 
-            onClick={() => {
-              if (!selectedLeadId) {
-                alert('Select a company lead first.');
-                return;
-              }
-              setIsAddingLead(true);
-            }}
-            className="bg-white border border-slate-200 hover:border-slate-300 text-slate-700 px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
-          >
-            <Users className="w-4 h-4" />
-            Add Contact
-          </button>
-          <button 
-            onClick={() => setIsManagingTemplates(true)}
-            className="p-2 text-slate-400 hover:text-crimson-600 hover:bg-crimson-50 rounded-full transition-all"
-            title="Manage Templates"
-          >
-            <Settings className="w-5 h-5" />
-          </button>
-          <button 
-            onClick={() => setIsManagingFields(true)}
-            className="p-2 text-slate-400 hover:text-crimson-600 hover:bg-crimson-50 rounded-full transition-all"
-            title="Custom Fields"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
+          {workspaceMode === 'crm' ? (
+            <>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input 
+                  type="text" 
+                  placeholder="Search contacts..." 
+                  className="pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-crimson-500 w-64 transition-all"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+              <button 
+                onClick={() => setIsAddingCompany(true)}
+                className="bg-crimson-600 hover:bg-crimson-700 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
+              >
+                <Plus className="w-4 h-4" />
+                Add Company
+              </button>
+              <button 
+                onClick={() => {
+                  if (!selectedLeadId) {
+                    alert('Select a company lead first.');
+                    return;
+                  }
+                  setIsAddingLead(true);
+                }}
+                className="bg-white border border-slate-200 hover:border-slate-300 text-slate-700 px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
+              >
+                <Users className="w-4 h-4" />
+                Add Contact
+              </button>
+              <button 
+                onClick={() => setIsManagingTemplates(true)}
+                className="p-2 text-slate-400 hover:text-crimson-600 hover:bg-crimson-50 rounded-full transition-all"
+                title="Manage Templates"
+              >
+                <Settings className="w-5 h-5" />
+              </button>
+              <button 
+                onClick={() => setIsManagingFields(true)}
+                className="p-2 text-slate-400 hover:text-crimson-600 hover:bg-crimson-50 rounded-full transition-all"
+                title="Custom Fields"
+              >
+                <Plus className="w-5 h-5" />
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={handleStartCroatiaSync}
+              disabled={isSyncingCroatiaCompanies}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-full text-sm font-bold disabled:opacity-50"
+            >
+              {isSyncingCroatiaCompanies ? 'Sync Running...' : 'Sync Sudreg'}
+            </button>
+          )}
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto p-6 grid grid-cols-12 gap-6 h-[calc(100vh-80px)]">
+      <main className={`${workspaceMode === 'crm' ? 'max-w-7xl grid' : 'hidden'} mx-auto p-6 grid-cols-12 gap-6 h-[calc(100vh-80px)]`}>
         {/* Leads List */}
         <div className="col-span-4 bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
           <div className="p-4 border-b border-slate-100 bg-slate-50/50">
@@ -1147,6 +1360,259 @@ If linkedin_url is unknown, set it to an empty string.`,
           </AnimatePresence>
         </div>
       </main>
+
+      {workspaceMode === 'registry' && (
+        <main className="max-w-7xl mx-auto p-6 grid grid-cols-12 gap-6 h-[calc(100vh-80px)]">
+          <section className="col-span-4 bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/60">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Registry Filters</h2>
+              <p className="text-[11px] text-slate-500 mt-1">Results update automatically as you type.</p>
+            </div>
+            <div className="p-4 space-y-3 border-b border-slate-100">
+              <input
+                type="text"
+                value={croatiaCompanyQuery}
+                onChange={(e) => setCroatiaCompanyQuery(e.target.value)}
+                placeholder="Name, OIB, or MBS"
+                className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-crimson-500/20"
+              />
+              <input
+                type="text"
+                value={selectedCroatiaCity}
+                onChange={(e) => setSelectedCroatiaCity(e.target.value)}
+                placeholder="City"
+                className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-crimson-500/20"
+              />
+              <input
+                type="text"
+                value={selectedCroatiaRegion}
+                onChange={(e) => setSelectedCroatiaRegion(e.target.value)}
+                placeholder="Region / County"
+                className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-crimson-500/20"
+              />
+              <details className="border border-slate-200 rounded-lg bg-slate-50">
+                <summary className="px-3 py-2 text-sm font-semibold cursor-pointer select-none">
+                  NKD filter {selectedCroatiaNkds.length ? `(${selectedCroatiaNkds.length} selected)` : '(none)'}
+                </summary>
+                <div className="p-3 border-t border-slate-200 space-y-2">
+                  <input
+                    type="text"
+                    value={croatiaNkdQuery}
+                    onChange={(e) => setCroatiaNkdQuery(e.target.value)}
+                    placeholder="Search NKD code or name..."
+                    className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-crimson-500/20"
+                  />
+                  <div className="max-h-44 overflow-y-auto rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                    {croatiaNkds
+                      .filter((nkd) => {
+                        if (!croatiaNkdQuery.trim()) return true;
+                        const q = croatiaNkdQuery.toLowerCase();
+                        return nkd.code.toLowerCase().includes(q) || (nkd.name || '').toLowerCase().includes(q);
+                      })
+                      .map((nkd) => {
+                        const checked = selectedCroatiaNkds.includes(nkd.code);
+                        return (
+                          <label key={nkd.code} className="flex items-start gap-2 p-2 text-xs hover:bg-slate-50">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                setSelectedCroatiaNkds((prev) =>
+                                  e.target.checked ? [...prev, nkd.code] : prev.filter((x) => x !== nkd.code)
+                                );
+                              }}
+                            />
+                            <span>{nkd.code} {nkd.name ? `- ${nkd.name}` : ''}</span>
+                          </label>
+                        );
+                      })}
+                  </div>
+                  {selectedCroatiaNkds.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {selectedCroatiaNkds.map((code) => {
+                        const nkd = croatiaNkds.find((n) => n.code === code);
+                        return (
+                          <button
+                            key={code}
+                            onClick={() => setSelectedCroatiaNkds((prev) => prev.filter((x) => x !== code))}
+                            className="px-2 py-1 text-[10px] rounded-full bg-crimson-50 text-crimson-700 border border-crimson-100"
+                          >
+                            {code}{nkd?.name ? ` ${nkd.name}` : ''} ×
+                          </button>
+                        );
+                      })}
+                      <button
+                        onClick={() => setSelectedCroatiaNkds([])}
+                        className="px-2 py-1 text-[10px] rounded-full bg-slate-100 text-slate-600 border border-slate-200"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </details>
+              <select
+                value={selectedCroatiaNkdMode}
+                onChange={(e) => setSelectedCroatiaNkdMode(e.target.value as 'any' | 'primary' | 'secondary')}
+                className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-crimson-500/20"
+              >
+                <option value="any">NKD Any</option>
+                <option value="primary">NKD Primary</option>
+                <option value="secondary">NKD Secondary</option>
+              </select>
+            </div>
+            <div className="px-4 py-2 border-b border-slate-100 text-xs text-slate-500 bg-slate-50/40">
+              {isSearchingCroatiaCompanies ? 'Searching...' : `${croatiaCompanyResults.length} companies`}
+            </div>
+            <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+              {croatiaCompanyResults.map((company, index) => {
+                const key = `${company.oib || company.mbs || company.name}-${index}`;
+                const selected = selectedRegistryMbs && company.mbs === selectedRegistryMbs;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => handleOpenCompanyDetail(company.mbs)}
+                    className={`w-full text-left p-4 hover:bg-slate-50 transition-colors ${selected ? 'bg-crimson-50/40 border-l-4 border-l-crimson-600' : ''}`}
+                  >
+                    <p className="text-sm font-semibold text-ink truncate">{company.name}</p>
+                    <p className="text-xs text-slate-500 mt-1">{company.city || 'No city'} {company.mbs ? `· MBS ${company.mbs}` : ''}</p>
+                  </button>
+                );
+              })}
+              {!isSearchingCroatiaCompanies && croatiaCompanyResults.length === 0 && (
+                <div className="p-8 text-center text-slate-400 text-sm">No companies match current filters.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="col-span-8 bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Company Detail</h2>
+              {selectedCompanyDetail && (
+                <button
+                  onClick={() => handleImportCroatiaCompany(selectedCompanyDetail)}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold"
+                >
+                  Import Company
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              {isLoadingCompanyDetail && <p className="text-sm text-slate-500">Loading detail...</p>}
+              {!isLoadingCompanyDetail && registryDetailError && <p className="text-sm text-red-600">{registryDetailError}</p>}
+              {!isLoadingCompanyDetail && !registryDetailError && selectedCompanyDetail && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-2xl font-bold text-ink">{selectedCompanyDetail.name || 'Unnamed company'}</h3>
+                    <p className="text-xs text-slate-600 mt-1">
+                      {selectedCompanyDetail.oib ? `OIB ${selectedCompanyDetail.oib}` : 'No OIB'} {selectedCompanyDetail.mbs ? `· MBS ${selectedCompanyDetail.mbs}` : ''}
+                    </p>
+                  </div>
+                  {selectedCompanyDetail?.structured && (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Identifiers</p>
+                          <p className="text-sm text-ink mt-1">MBS: {renderValue(selectedCompanyDetail.structured?.ids?.potpuni_mbs || selectedCompanyDetail.structured?.ids?.mbs)}</p>
+                          <p className="text-sm text-ink">OIB: {renderValue(selectedCompanyDetail.structured?.ids?.potpuni_oib || selectedCompanyDetail.structured?.ids?.oib)}</p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Timeline</p>
+                          <p className="text-sm text-ink mt-1">Founded: {fmtDate(selectedCompanyDetail.structured?.dates?.datum_osnivanja)}</p>
+                          <p className="text-sm text-ink">Last Change: {fmtDate(selectedCompanyDetail.structured?.dates?.vrijeme_zadnje_izmjene)}</p>
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white border border-slate-200">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Company</p>
+                        <p className="text-sm text-ink mt-1">
+                          Full: {renderValue(selectedCompanyDetail.structured?.company_name?.tvrtka?.ime)}
+                        </p>
+                        <p className="text-sm text-ink">
+                          Short: {renderValue(selectedCompanyDetail.structured?.company_name?.skracena_tvrtka?.ime)}
+                        </p>
+                        <p className="text-sm text-ink">Procedure: {renderValue(selectedCompanyDetail.structured?.postupak)}</p>
+                        <p className="text-sm text-ink">
+                          Legal Form: {renderValue(selectedCompanyDetail.structured?.legal_form?.naziv || selectedCompanyDetail.structured?.legal_form)}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="p-3 rounded-xl bg-white border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Seat</p>
+                          <p className="text-sm text-ink mt-1">
+                            {renderValue(selectedCompanyDetail.structured?.seat?.ulica)} {renderValue(selectedCompanyDetail.structured?.seat?.kucni_broj)}
+                          </p>
+                          <p className="text-sm text-ink">
+                            {renderValue(selectedCompanyDetail.structured?.seat?.naziv_naselja)}, {renderValue(selectedCompanyDetail.structured?.seat?.naziv_zupanije)}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-white border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Courts</p>
+                          <p className="text-sm text-ink mt-1">Nadlezan: {renderValue(selectedCompanyDetail.structured?.courts?.sud_nadlezan?.naziv)}</p>
+                          <p className="text-sm text-ink">Sluzba: {renderValue(selectedCompanyDetail.structured?.courts?.sud_sluzba?.naziv)}</p>
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white border border-slate-200">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">NKD</p>
+                        <p className="text-sm text-ink mt-1">
+                          Primary: {renderValue(selectedCompanyDetail.structured?.primary_activity?.sifra)} - {renderValue(selectedCompanyDetail.structured?.primary_activity?.puni_naziv)}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {(selectedCompanyDetail.structured?.activities?.nkd_povezane || []).slice(0, 20).map((nkd: any) => (
+                            <span key={nkd.code} className="px-2 py-1 rounded-full text-[10px] bg-slate-100 border border-slate-200 text-slate-700">
+                              {nkd.code} {nkd.name ? `- ${nkd.name}` : ''} {nkd.relationType ? `(${nkd.relationType})` : ''}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white border border-slate-200">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Evidencijske Djelatnosti</p>
+                        <div className="mt-2 max-h-40 overflow-y-auto space-y-1">
+                          {(selectedCompanyDetail.structured?.activities?.evidencijske_djelatnosti || []).map((a: any, i: number) => (
+                            <p key={`a-${i}`} className="text-xs text-slate-700">
+                              {renderValue(a?.djelatnost_rbr)}. {renderValue(a?.djelatnost_tekst)}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="p-3 rounded-xl bg-white border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Capitals</p>
+                          <p className="text-sm text-ink mt-1">{(selectedCompanyDetail.structured?.capitals || []).length}</p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-white border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Status Procedures</p>
+                          <p className="text-sm text-ink mt-1">{(selectedCompanyDetail.structured?.status_procedures || []).length}</p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-white border border-slate-200">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">GFI Reports</p>
+                          <p className="text-sm text-ink mt-1">{(selectedCompanyDetail.structured?.financial_reports || []).length}</p>
+                        </div>
+                      </div>
+
+                      <details className="rounded-xl border border-slate-200 bg-slate-50">
+                        <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700">Raw Sudreg JSON</summary>
+                        <pre className="text-xs leading-relaxed bg-slate-950 text-slate-100 p-4 rounded-b-xl overflow-x-auto whitespace-pre-wrap">
+{JSON.stringify(selectedCompanyDetail?.detail || selectedCompanyDetail, null, 2)}
+                        </pre>
+                      </details>
+                    </div>
+                  )}
+                </div>
+              )}
+              {!isLoadingCompanyDetail && !registryDetailError && !selectedCompanyDetail && (
+                <div className="h-full flex items-center justify-center text-sm text-slate-400">
+                  Select a company on the left to inspect full data.
+                </div>
+              )}
+            </div>
+          </section>
+        </main>
+      )}
 
       {/* Add Company Modal */}
       <AnimatePresence>

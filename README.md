@@ -38,6 +38,8 @@ Prerequisite: Node.js 18+
 2. Configure environment variables in `.env.local` (use `.env.example` as reference), including:
    `OPENAI_API_KEY`
    `SERPER_API_KEY` (required for web-grounded company people research)
+   `SUDREG_CLIENT_ID` and `SUDREG_CLIENT_SECRET` (required for Croatia company search/import)
+   `SUDREG_SYNC_PAGE_SIZE` (optional, defaults to `5000`)
    `DATABASE_PATH` (optional, defaults to `./data/crimson.db`)
 3. Start the app:
    `npm run dev`

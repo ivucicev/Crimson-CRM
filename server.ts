@@ -963,6 +963,10 @@ Rules:
   };
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const isSudregNoRowsError = (error: any) => {
+    const msg = formatError(error).toLowerCase();
+    return msg.includes('"error_code":505') || msg.includes("nije vratio ni jedan redak");
+  };
 
   const fetchSudreg = async (token: string, endpoint: string, retries = 2) => {
     let lastError: any = null;
@@ -1728,9 +1732,17 @@ Rules:
           let listEndpoint = `${sudregBaseUrl}/tvrtke?offset=${offset}&limit=${activePageSize}`;
           console.log(`[Sudreg] [Phase 1/2] Fetching page ${sudregSyncState.currentPage} (offset=${offset}, limit=${activePageSize})`);
           let listData: any;
+          let endOfPagination = false;
           try {
             listData = await fetchSudreg(token, listEndpoint);
           } catch (error: any) {
+            if (isSudregNoRowsError(error)) {
+              console.log(
+                `[Sudreg] [Phase 1/2] End of list detected on page ${sudregSyncState.currentPage} (offset=${offset}, limit=${activePageSize}).`
+              );
+              endOfPagination = true;
+            }
+            if (endOfPagination) break;
             const canFallback = activePageSize > 1000;
             if (!canFallback) throw error;
             const fallbackSize = 1000;
@@ -1740,8 +1752,20 @@ Rules:
             activePageSize = fallbackSize;
             listEndpoint = `${sudregBaseUrl}/tvrtke?offset=${offset}&limit=${activePageSize}`;
             console.log(`[Sudreg] [Phase 1/2] Retrying page ${sudregSyncState.currentPage} (offset=${offset}, limit=${activePageSize})`);
-            listData = await fetchSudreg(token, listEndpoint);
+            try {
+              listData = await fetchSudreg(token, listEndpoint);
+            } catch (fallbackError: any) {
+              if (isSudregNoRowsError(fallbackError)) {
+                console.log(
+                  `[Sudreg] [Phase 1/2] End of list detected after fallback on page ${sudregSyncState.currentPage} (offset=${offset}, limit=${activePageSize}).`
+                );
+                endOfPagination = true;
+              } else {
+                throw fallbackError;
+              }
+            }
           }
+          if (endOfPagination) break;
           const list = extractSudregTvrtke(listData);
           if (!list.length) {
             console.log(`[Sudreg] [Phase 1/2] No data on page ${sudregSyncState.currentPage}; pagination complete.`);

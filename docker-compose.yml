@@ -15,5 +15,5 @@ services:
       - SUDREG_SYNC_PAGE_SIZE=${SUDREG_SYNC_PAGE_SIZE:-5000}
       - DATABASE_PATH=/app/data/crimson.db
     volumes:
-      - ./data:/app/data
+      - /home/home/containers/crimson/data:/app/data
     restart: always

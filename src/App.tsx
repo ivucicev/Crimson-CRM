@@ -297,7 +297,7 @@ export default function App() {
       const firstMbs = croatiaCompanyResults[0]?.mbs || '';
       if (firstMbs) {
         setSelectedRegistryMbs(firstMbs);
-        handleOpenCompanyDetail(firstMbs);
+        setSelectedCompanyDetail(null);
       }
     }
   }, [workspaceMode, croatiaCompanyResults]);
@@ -722,7 +722,7 @@ If linkedin_url is unknown, set it to an empty string.`,
       if (selectedCroatiaNkds.length) params.set('nkd_mode', selectedCroatiaNkdMode);
       if (city) params.set('city', city);
       if (county) params.set('county', county);
-      params.set('limit', '100');
+      params.set('limit', '500');
       const res = await fetch(`/api/registry/hr/companies/search?${params.toString()}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Pretraga hrvatskih tvrtki nije uspjela');
@@ -736,10 +736,7 @@ If linkedin_url is unknown, set it to an empty string.`,
 
   useEffect(() => {
     if (workspaceMode !== 'registry') return;
-    const timeout = setTimeout(() => {
-      handleSearchCroatiaCompanies();
-    }, 180);
-    return () => clearTimeout(timeout);
+    handleSearchCroatiaCompanies();
   }, [workspaceMode, croatiaCompanyQuery, selectedCroatiaCity, selectedCroatiaCounty, selectedCroatiaNkds.join('|'), selectedCroatiaNkdMode]);
 
   useEffect(() => {

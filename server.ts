@@ -1925,7 +1925,7 @@ Rules:
       nkdModeRaw === "primary" || nkdModeRaw === "secondary" ? (nkdModeRaw as "primary" | "secondary") : "any";
     const city = String(req.query.city || "").trim();
     const county = String(req.query.county || "").trim();
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit || 30)));
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
     const like = `%${q}%`;
     const cityLike = `%${city}%`;
     const hasQ = !!q;
@@ -1944,7 +1944,7 @@ Rules:
       params.push(cityLike);
     }
     if (hasCounty) {
-      where += " AND (c.county = ? OR c.raw_json LIKE ?)";
+      where += " AND (LOWER(TRIM(c.county)) = LOWER(TRIM(?)) OR (c.county IS NULL AND c.raw_json LIKE ?))";
       params.push(county, `%${county}%`);
     }
     if (!hasNkd) {

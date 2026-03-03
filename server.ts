@@ -1647,6 +1647,8 @@ Rules:
 
   const startSudregSync = () => {
     if (sudregSyncState.running) return false;
+    const startedAtMs = Date.now();
+    console.log("[Sudreg] Sync started");
     sudregSyncState = {
       running: true,
       startedAt: new Date().toISOString(),
@@ -1662,8 +1664,10 @@ Rules:
       try {
         const token = await getSudregToken();
         const pageSize = Math.max(1, Math.min(9999, Number(process.env.SUDREG_SYNC_PAGE_SIZE || 5000)));
+        console.log(`[Sudreg] Using page size: ${pageSize}`);
         const nkdEndpoint = `${sudregBaseUrl}/nacionalna_klasifikacija_djelatnosti`;
         try {
+          console.log("[Sudreg] Syncing NKD codes...");
           const nkdData = await fetchSudreg(token, nkdEndpoint);
           const nkdList = Array.isArray(nkdData)
             ? nkdData
@@ -1678,18 +1682,26 @@ Rules:
             upsertRegistryNkd.run(code, name || null, JSON.stringify(nkd));
             sudregSyncState.importedNkds += 1;
           }
+          console.log(`[Sudreg] NKD sync done: ${sudregSyncState.importedNkds} records`);
         } catch (error: any) {
           sudregSyncState.lastError = `NKD sync warning: ${error.message}`;
+          console.error("[Sudreg] NKD sync warning:", error.message);
         }
 
         const existingRows = db.prepare("SELECT mbs FROM registry_hr_companies WHERE mbs IS NOT NULL").all() as Array<{ mbs: string }>;
         const knownMbs = new Set(existingRows.map((row) => String(row.mbs).trim()).filter(Boolean));
+        console.log(`[Sudreg] Existing cached companies: ${knownMbs.size}`);
         for (let offset = 0; ; offset += pageSize) {
           sudregSyncState.currentPage += 1;
           const listEndpoint = `${sudregBaseUrl}/tvrtke?offset=${offset}&limit=${pageSize}`;
+          console.log(`[Sudreg] Fetching page ${sudregSyncState.currentPage} (offset=${offset}, limit=${pageSize})`);
           const listData = await fetchSudreg(token, listEndpoint);
           const list = extractSudregTvrtke(listData);
-          if (!list.length) break;
+          if (!list.length) {
+            console.log(`[Sudreg] No data on page ${sudregSyncState.currentPage}; stopping pagination.`);
+            break;
+          }
+          console.log(`[Sudreg] Page ${sudregSyncState.currentPage} returned ${list.length} companies`);
           for (const item of list) {
             const mapped = mapSudregCompany(item);
             const mbs = String(mapped.mbs || "").trim();
@@ -1738,13 +1750,26 @@ Rules:
             sudregSyncState.processedCompanies += 1;
             sudregSyncState.importedCompanies += 1;
             knownMbs.add(mbs);
+            if (sudregSyncState.processedCompanies % 250 === 0) {
+              console.log(
+                `[Sudreg] Progress: processed=${sudregSyncState.processedCompanies}, imported=${sudregSyncState.importedCompanies}, skipped=${sudregSyncState.skippedCompanies}`
+              );
+            }
           }
+          console.log(
+            `[Sudreg] Completed page ${sudregSyncState.currentPage}: processed=${sudregSyncState.processedCompanies}, imported=${sudregSyncState.importedCompanies}, skipped=${sudregSyncState.skippedCompanies}`
+          );
         }
       } catch (error: any) {
         sudregSyncState.lastError = error.message || "Unknown sync error";
+        console.error("[Sudreg] Sync error:", sudregSyncState.lastError);
       } finally {
         sudregSyncState.running = false;
         sudregSyncState.finishedAt = new Date().toISOString();
+        const durationSec = Math.round((Date.now() - startedAtMs) / 1000);
+        console.log(
+          `[Sudreg] Sync finished in ${durationSec}s. processed=${sudregSyncState.processedCompanies}, imported=${sudregSyncState.importedCompanies}, skipped=${sudregSyncState.skippedCompanies}, nkd=${sudregSyncState.importedNkds}, error=${sudregSyncState.lastError || "none"}`
+        );
       }
     })();
     return true;
@@ -1765,9 +1790,12 @@ Rules:
   };
   const initializeSudregSync = () => {
     const cachedCompanies = db.prepare("SELECT COUNT(*) as count FROM registry_hr_companies").get() as { count: number };
+    console.log(`[Sudreg] Cached companies on startup: ${cachedCompanies.count}`);
     if (cachedCompanies.count === 0) {
+      console.log("[Sudreg] Cache is empty; starting initial sync immediately.");
       startSudregSync();
     }
+    console.log("[Sudreg] Daily sync scheduled for 04:00 server local time.");
     scheduleDailySudregSync();
   };
   initializeSudregSync();

@@ -1909,6 +1909,12 @@ Rules:
   });
 
   app.get("/api/registry/hr/companies/search", (req, res) => {
+    const stripDiacritics = (value: string) =>
+      value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d")
+        .replace(/Đ/g, "D");
     const q = String(req.query.q || "").trim();
     const nkdSingle = normalizeNkdCode(String(req.query.nkd || "").trim());
     const nkdCodesRaw = String(req.query.nkd_codes || "").trim();
@@ -1925,6 +1931,12 @@ Rules:
       nkdModeRaw === "primary" || nkdModeRaw === "secondary" ? (nkdModeRaw as "primary" | "secondary") : "any";
     const city = String(req.query.city || "").trim();
     const county = String(req.query.county || "").trim();
+    const countyAscii = stripDiacritics(county);
+    const countyTokens = county
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3)
+      .slice(0, 6);
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
     const like = `%${q}%`;
     const cityLike = `%${city}%`;
@@ -1944,8 +1956,21 @@ Rules:
       params.push(cityLike);
     }
     if (hasCounty) {
-      where += " AND (LOWER(TRIM(c.county)) = LOWER(TRIM(?)) OR (c.county IS NULL AND c.raw_json LIKE ?))";
-      params.push(county, `%${county}%`);
+      const countyTokenSql = countyTokens.map(() => "c.raw_json LIKE ?").join(" OR ");
+      where += ` AND (
+        LOWER(TRIM(COALESCE(c.county, ''))) = LOWER(TRIM(?))
+        OR LOWER(COALESCE(c.county, '')) LIKE LOWER(?)
+        OR c.raw_json LIKE ?
+        OR c.raw_json LIKE ?
+        ${countyTokenSql ? `OR (${countyTokenSql})` : ""}
+      )`;
+      params.push(
+        county,
+        `%${county}%`,
+        `%${county}%`,
+        `%${countyAscii}%`,
+        ...countyTokens.map((t) => `%${t}%`)
+      );
     }
     if (!hasNkd) {
       rows = db

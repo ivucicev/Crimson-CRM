@@ -1763,7 +1763,14 @@ Rules:
       }, 24 * 60 * 60 * 1000);
     }, firstDelay);
   };
-  scheduleDailySudregSync();
+  const initializeSudregSync = () => {
+    const cachedCompanies = db.prepare("SELECT COUNT(*) as count FROM registry_hr_companies").get() as { count: number };
+    if (cachedCompanies.count === 0) {
+      startSudregSync();
+    }
+    scheduleDailySudregSync();
+  };
+  initializeSudregSync();
 
   app.post("/api/registry/hr/sync/start", (req, res) => {
     const started = startSudregSync();

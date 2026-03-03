@@ -1831,12 +1831,16 @@ Rules:
           );
         }
 
-        // Phase 2: enrich queued companies with detailed endpoint one-by-one.
+        // Phase 2: enrich queued companies with detailed endpoint in parallel workers.
         sudregSyncState.processedCompanies = 0;
         let detailFailures = 0;
         const pendingList = Array.from(pendingMbs);
-        console.log(`[Sudreg] [Phase 2/2] Starting detail enrichment for ${pendingList.length} companies...`);
-        for (const mbs of pendingList) {
+        const detailConcurrency = Math.max(1, Math.min(48, Number(process.env.SUDREG_DETAIL_CONCURRENCY || 12)));
+        console.log(
+          `[Sudreg] [Phase 2/2] Starting detail enrichment for ${pendingList.length} companies with concurrency=${detailConcurrency}...`
+        );
+
+        const enrichOne = async (mbs: string) => {
           const cached = db.prepare(`
             SELECT name, oib, court, status, city, county, address, website
             FROM registry_hr_companies
@@ -1871,13 +1875,28 @@ Rules:
             detailFailures += 1;
             console.warn(`[Sudreg] [Phase 2/2] Detail fetch failed for mbs=${mbs}: ${formatError(error)}`);
           }
-          sudregSyncState.processedCompanies += 1;
-          if (sudregSyncState.processedCompanies % 250 === 0 || sudregSyncState.processedCompanies === pendingList.length) {
-            console.log(
-              `[Sudreg] [Phase 2/2] Progress: processedDetails=${sudregSyncState.processedCompanies}/${pendingList.length}, detailFailures=${detailFailures}`
-            );
+        };
+
+        let nextIndex = 0;
+        const workerCount = Math.min(detailConcurrency, Math.max(1, pendingList.length));
+        const workers = Array.from({ length: workerCount }, async () => {
+          for (;;) {
+            const idx = nextIndex++;
+            if (idx >= pendingList.length) break;
+            const mbs = pendingList[idx];
+            await enrichOne(mbs);
+            sudregSyncState.processedCompanies += 1;
+            if (
+              sudregSyncState.processedCompanies % 250 === 0 ||
+              sudregSyncState.processedCompanies === pendingList.length
+            ) {
+              console.log(
+                `[Sudreg] [Phase 2/2] Progress: processedDetails=${sudregSyncState.processedCompanies}/${pendingList.length}, detailFailures=${detailFailures}`
+              );
+            }
           }
-        }
+        });
+        await Promise.all(workers);
         console.log(
           `[Sudreg] [Phase 2/2] Detail enrichment complete: processedDetails=${sudregSyncState.processedCompanies}, detailFailures=${detailFailures}`
         );

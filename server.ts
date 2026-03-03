@@ -553,6 +553,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS idx_memberships_tenant_id ON tenant_memberships(tenant_id);
+  CREATE INDEX IF NOT EXISTS idx_registry_hr_companies_county ON registry_hr_companies(county);
+  CREATE INDEX IF NOT EXISTS idx_registry_hr_companies_city ON registry_hr_companies(city);
+  CREATE INDEX IF NOT EXISTS idx_registry_hr_companies_updated_at ON registry_hr_companies(updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_registry_hr_company_nkds_mbs ON registry_hr_company_nkds(mbs);
+  CREATE INDEX IF NOT EXISTS idx_registry_hr_company_nkds_code ON registry_hr_company_nkds(nkd_code);
+  CREATE INDEX IF NOT EXISTS idx_registry_hr_company_nkds_rel_code ON registry_hr_company_nkds(relation_type, nkd_code);
   CREATE UNIQUE INDEX IF NOT EXISTS uq_companies_tenant_name ON companies(tenant_id, name);
   CREATE UNIQUE INDEX IF NOT EXISTS uq_fields_tenant_label ON custom_field_definitions(tenant_id, label);
 `);
@@ -1909,55 +1915,6 @@ Rules:
   });
 
   app.get("/api/registry/hr/companies/search", (req, res) => {
-    const stripDiacritics = (value: string) =>
-      value
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/đ/g, "d")
-        .replace(/Đ/g, "D");
-    const normalizeCounty = (value: string) =>
-      stripDiacritics(String(value || ""))
-        .toLowerCase()
-        .replace(/\bzupanija\b/g, "")
-        .replace(/\bžupanija\b/g, "")
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim();
-    const extractCountyCandidates = (row: any): string[] => {
-      const candidates = new Set<string>();
-      const directCounty = String(row?.county || "").trim();
-      if (directCounty) candidates.add(directCounty);
-      try {
-        const parsed = row?.raw_json ? JSON.parse(row.raw_json) : null;
-        const detail = extractSudregDetail(parsed || {});
-        const seatCounty = String(detail?.sjediste?.naziv_zupanije || "").trim();
-        const courtCounty = String(detail?.sud_nadlezan?.naziv_zupanije || "").trim();
-        const officeCounty = String(detail?.sud_sluzba?.naziv_zupanije || "").trim();
-        if (seatCounty) candidates.add(seatCounty);
-        if (courtCounty) candidates.add(courtCounty);
-        if (officeCounty) candidates.add(officeCounty);
-      } catch {
-        // Ignore malformed cached JSON rows.
-      }
-      return Array.from(candidates);
-    };
-    const rowMatchesCounty = (row: any, countyFilterNormalized: string) => {
-      if (!countyFilterNormalized) return true;
-      const candidates = extractCountyCandidates(row);
-      if (!candidates.length) return false;
-      return candidates.some((c) => normalizeCounty(c) === countyFilterNormalized);
-    };
-    const mapCompanyRow = (row: any) => ({
-      mbs: row.mbs,
-      name: row.name,
-      oib: row.oib,
-      court: row.court,
-      status: row.status,
-      city: row.city,
-      county: row.county,
-      address: row.address,
-      website: row.website,
-      updated_at: row.updated_at,
-    });
     const q = String(req.query.q || "").trim();
     const nkdSingle = normalizeNkdCode(String(req.query.nkd || "").trim());
     const nkdCodesRaw = String(req.query.nkd_codes || "").trim();
@@ -1974,7 +1931,6 @@ Rules:
       nkdModeRaw === "primary" || nkdModeRaw === "secondary" ? (nkdModeRaw as "primary" | "secondary") : "any";
     const city = String(req.query.city || "").trim();
     const county = String(req.query.county || "").trim();
-    const countyNormalized = normalizeCounty(county);
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
     const like = `%${q}%`;
     const cityLike = `%${city}%`;
@@ -1992,130 +1948,52 @@ Rules:
       where += " AND c.city LIKE ?";
       params.push(cityLike);
     }
+    if (hasCounty) {
+      where += " AND c.county = ?";
+      params.push(county);
+    }
+
+    const selectColumns = `
+      c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at
+    `;
+
     if (!hasNkd) {
-      const matches: any[] = [];
-      const seen = new Set<string>();
-      const batchSize = 2000;
-      let offset = 0;
-      for (;;) {
-        const batch = db
-          .prepare(`
-            SELECT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at, c.raw_json
-            FROM registry_hr_companies c
-            ${where}
-            ORDER BY c.updated_at DESC
-            LIMIT ? OFFSET ?
-          `)
-          .all(...params, batchSize, offset) as Array<any>;
-        if (!batch.length) break;
-        for (const row of batch) {
-          const mbs = String(row.mbs || "").trim();
-          if (!mbs || seen.has(mbs)) continue;
-          seen.add(mbs);
-          if (hasCounty && !rowMatchesCounty(row, countyNormalized)) continue;
-          matches.push(mapCompanyRow(row));
-          if (matches.length >= limit) {
-            return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
-          }
-        }
-        offset += batchSize;
-      }
-      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
-    }
-
-    let nkdSql = "";
-    const nkdSqlParams: any[] = [];
-    if (nkdMode === "any") {
-      const rawParts = nkdCodes.map(() => "c.raw_json LIKE ?");
-      nkdSql = ` AND (${rawParts.join(" OR ")} OR EXISTS (SELECT 1 FROM registry_hr_company_nkds cn WHERE cn.mbs = c.mbs AND cn.nkd_code IN (${nkdCodes.map(() => "?").join(", ")})))`;
-      nkdSqlParams.push(...nkdCodes.map((code) => `%${code}%`), ...nkdCodes);
-    } else {
-      // For primary/secondary we still parse payloads for precision, but prefilter rows first.
-      const rawParts = nkdCodes.map(() => "c.raw_json LIKE ?");
-      nkdSql = ` AND (${rawParts.join(" OR ")} OR EXISTS (SELECT 1 FROM registry_hr_company_nkds cn WHERE cn.mbs = c.mbs AND cn.nkd_code IN (${nkdCodes.map(() => "?").join(", ")}) AND cn.relation_type = ?))`;
-      nkdSqlParams.push(...nkdCodes.map((code) => `%${code}%`), ...nkdCodes, nkdMode);
-    }
-
-    if (nkdMode === "any") {
-      const matches: any[] = [];
-      const seen = new Set<string>();
-      const batchSize = 2000;
-      let offset = 0;
-      for (;;) {
-        const batch = db
-          .prepare(`
-            SELECT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at, c.raw_json
-            FROM registry_hr_companies c
-            ${where}
-            ${nkdSql}
-            ORDER BY c.updated_at DESC
-            LIMIT ? OFFSET ?
-          `)
-          .all(...params, ...nkdSqlParams, batchSize, offset) as Array<any>;
-        if (!batch.length) break;
-        for (const row of batch) {
-          const mbs = String(row.mbs || "").trim();
-          if (!mbs || seen.has(mbs)) continue;
-          seen.add(mbs);
-          if (hasCounty && !rowMatchesCounty(row, countyNormalized)) continue;
-          matches.push(mapCompanyRow(row));
-          if (matches.length >= limit) {
-            return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
-          }
-        }
-        offset += batchSize;
-      }
-      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
-    }
-
-    const matches: any[] = [];
-    const seen = new Set<string>();
-    const batchSize = 2000;
-    let offset = 0;
-
-    for (;;) {
-      const batch = db
+      const rows = db
         .prepare(`
-          SELECT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at, c.raw_json
+          SELECT ${selectColumns}
           FROM registry_hr_companies c
           ${where}
-          ${nkdSql}
           ORDER BY c.updated_at DESC
-          LIMIT ? OFFSET ?
+          LIMIT ?
         `)
-        .all(...params, ...nkdSqlParams, batchSize, offset) as Array<any>;
-      if (!batch.length) break;
-
-      for (const row of batch) {
-        const mbs = String(row.mbs || "").trim();
-        if (!mbs || seen.has(mbs)) continue;
-        seen.add(mbs);
-
-        let parsed: any = null;
-        try {
-          parsed = row.raw_json ? JSON.parse(row.raw_json) : null;
-        } catch {
-          parsed = null;
-        }
-        const detail = extractSudregDetail(parsed || {});
-        const nkds = extractNkdsFromDetail(detail);
-        const hit = nkds.some((n) => {
-          if (!nkdCodes.includes(n.code)) return false;
-          return n.relationType === nkdMode;
-        });
-        if (!hit) continue;
-
-        if (hasCounty && !rowMatchesCounty(row, countyNormalized)) continue;
-        matches.push(mapCompanyRow(row));
-        if (matches.length >= limit) {
-          return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
-        }
-      }
-
-      offset += batchSize;
+        .all(...params, limit);
+      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: rows.length, results: rows });
     }
 
-    return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
+    const nkdPlaceholders = nkdCodes.map(() => "?").join(", ");
+    const nkdParams: any[] = [...nkdCodes];
+    let joinSql = `
+      INNER JOIN registry_hr_company_nkds cn
+        ON cn.mbs = c.mbs
+       AND cn.nkd_code IN (${nkdPlaceholders})
+    `;
+    if (nkdMode === "primary" || nkdMode === "secondary") {
+      joinSql += " AND cn.relation_type = ?";
+      nkdParams.push(nkdMode);
+    }
+
+    const rows = db
+      .prepare(`
+        SELECT DISTINCT ${selectColumns}
+        FROM registry_hr_companies c
+        ${joinSql}
+        ${where}
+        ORDER BY c.updated_at DESC
+        LIMIT ?
+      `)
+      .all(...nkdParams, ...params, limit);
+
+    return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: rows.length, results: rows });
   });
 
   const countyLabels: Record<string, string> = {

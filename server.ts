@@ -879,6 +879,9 @@ Rules:
     sudregTokenCache = { token, expiresAt: now + expiresIn * 1000 };
     return token;
   };
+  const invalidateSudregTokenCache = () => {
+    sudregTokenCache = null;
+  };
 
   const mapSudregCompany = (item: any) => ({
     name:
@@ -974,13 +977,14 @@ Rules:
     return msg.includes('"error_code":505') || msg.includes("nije vratio ni jedan redak");
   };
 
-  const fetchSudreg = async (token: string, endpoint: string, retries = 2) => {
+  const fetchSudreg = async (endpoint: string, retries = 2) => {
     let lastError: any = null;
     for (let attempt = 0; attempt <= retries; attempt++) {
       const controller = new AbortController();
       const timeoutMs = Number(process.env.SUDREG_HTTP_TIMEOUT_MS || 45000);
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const token = await getSudregToken();
         const response = await fetch(endpoint, {
           method: "GET",
           headers: {
@@ -992,6 +996,14 @@ Rules:
         clearTimeout(timeout);
         if (!response.ok) {
           const body = await response.text().catch(() => "");
+          if (response.status === 401) {
+            invalidateSudregTokenCache();
+            console.warn(`[Sudreg] Token expired/unauthorized. Refreshing token and retrying request: ${endpoint}`);
+            if (attempt < retries) {
+              await sleep(300);
+              continue;
+            }
+          }
           throw new Error(`Sudreg zahtjev nije uspio (${response.status}) [attempt ${attempt + 1}/${retries + 1}]: ${endpoint} ${body ? `| body: ${body.slice(0, 500)}` : ""}`);
         }
         return response.json();
@@ -1293,7 +1305,7 @@ Rules:
     return Array.from(outUnknown).sort((a, b) => a.localeCompare(b));
   };
 
-  const fetchSudregEmailsByMbs = async (token: string, mbs: string, oib?: string | null) => {
+  const fetchSudregEmailsByMbs = async (mbs: string, oib?: string | null) => {
     const normalizedMbs = normalizeMbs(mbs);
     const paddedMbs = normalizedMbs ? normalizedMbs.padStart(9, "0") : mbs;
     const variants = Array.from(new Set([String(mbs), normalizedMbs, paddedMbs].filter(Boolean)));
@@ -1306,7 +1318,7 @@ Rules:
     let lastError: Error | null = null;
     for (const endpoint of candidates) {
       try {
-        const data = await fetchSudreg(token, endpoint);
+        const data = await fetchSudreg(endpoint);
         const emails = extractEmailAddressesFromPayload(data, mbs);
         if (!emails.length) {
           const fallback = extractEmailAddressesFromPayload(data, "");
@@ -1699,14 +1711,13 @@ Rules:
     };
     (async () => {
       try {
-        const token = await getSudregToken();
         const configuredPageSize = Math.max(1, Math.min(9999, Number(process.env.SUDREG_SYNC_PAGE_SIZE || 5000)));
         let activePageSize = configuredPageSize;
         console.log(`[Sudreg] Using page size: ${configuredPageSize}`);
         const nkdEndpoint = `${sudregBaseUrl}/nacionalna_klasifikacija_djelatnosti`;
         try {
           console.log("[Sudreg] Syncing NKD codes...");
-          const nkdData = await fetchSudreg(token, nkdEndpoint);
+          const nkdData = await fetchSudreg(nkdEndpoint);
           const nkdList = Array.isArray(nkdData)
             ? nkdData
             : Array.isArray(nkdData?.items)
@@ -1728,9 +1739,14 @@ Rules:
 
         const existingRows = db.prepare("SELECT mbs FROM registry_hr_companies WHERE mbs IS NOT NULL").all() as Array<{ mbs: string }>;
         const knownMbs = new Set(existingRows.map((row) => String(row.mbs).trim()).filter(Boolean));
+        const enrichedRows = db
+          .prepare("SELECT DISTINCT mbs FROM registry_hr_company_nkds WHERE mbs IS NOT NULL")
+          .all() as Array<{ mbs: string }>;
+        const enrichedMbs = new Set(enrichedRows.map((row) => String(row.mbs).trim()).filter(Boolean));
         const pendingMbs = new Set<string>();
         let listedCompanies = 0;
         console.log(`[Sudreg] Existing cached companies: ${knownMbs.size}`);
+        console.log(`[Sudreg] Already enriched companies (with NKD details): ${enrichedMbs.size}`);
 
         // Phase 1: fetch all companies pages and cache lightweight rows first.
         for (let offset = 0; ; offset += activePageSize) {
@@ -1740,7 +1756,7 @@ Rules:
           let listData: any;
           let endOfPagination = false;
           try {
-            listData = await fetchSudreg(token, listEndpoint);
+            listData = await fetchSudreg(listEndpoint);
           } catch (error: any) {
             if (isSudregNoRowsError(error)) {
               console.log(
@@ -1759,7 +1775,7 @@ Rules:
             listEndpoint = `${sudregBaseUrl}/tvrtke?offset=${offset}&limit=${activePageSize}`;
             console.log(`[Sudreg] [Phase 1/2] Retrying page ${sudregSyncState.currentPage} (offset=${offset}, limit=${activePageSize})`);
             try {
-              listData = await fetchSudreg(token, listEndpoint);
+              listData = await fetchSudreg(listEndpoint);
             } catch (fallbackError: any) {
               if (isSudregNoRowsError(fallbackError)) {
                 console.log(
@@ -1799,6 +1815,10 @@ Rules:
             );
 
             if (knownMbs.has(mbs)) {
+              if (!enrichedMbs.has(mbs)) {
+                pendingMbs.add(mbs);
+                continue;
+              }
               sudregSyncState.skippedCompanies += 1;
               continue;
             }
@@ -1827,7 +1847,7 @@ Rules:
             | undefined;
           try {
             const detailEndpoint = `${sudregBaseUrl}/detalji_subjekta?tip_identifikatora=mbs&identifikator=${encodeURIComponent(mbs)}&expand_relations=1`;
-            const detailData = await fetchSudreg(token, detailEndpoint);
+            const detailData = await fetchSudreg(detailEndpoint);
             const detailMapped = mapSudregCompany(extractSudregDetail(detailData));
             upsertRegistryCompany.run(
               mbs,
@@ -1846,6 +1866,7 @@ Rules:
             for (const nkd of nkds) {
               insertCompanyNkd.run(mbs, nkd.code, nkd.name || null, nkd.relationType);
             }
+            enrichedMbs.add(mbs);
           } catch (error: any) {
             detailFailures += 1;
             console.warn(`[Sudreg] [Phase 2/2] Detail fetch failed for mbs=${mbs}: ${formatError(error)}`);
@@ -2150,9 +2171,8 @@ Rules:
       const shouldRefresh = !hasExpandedDetail(detail);
       if (shouldRefresh) {
         try {
-          const token = await getSudregToken();
           const endpoint = `${sudregBaseUrl}/detalji_subjekta?tip_identifikatora=mbs&identifikator=${encodeURIComponent(mbsKey)}&expand_relations=1`;
-          const liveData = await fetchSudreg(token, endpoint);
+          const liveData = await fetchSudreg(endpoint);
           detail = extractSudregDetail(liveData);
           const mapped = mapSudregCompany(detail);
           upsertRegistryCompany.run(
@@ -2181,8 +2201,7 @@ Rules:
       detail = extractSudregDetail(detail || parsed || {});
       let emails = (selectCompanyEmails.all(mbsKey) as Array<{ email: string }>).map((r) => String(r.email || "").trim().toLowerCase()).filter(Boolean);
       try {
-        const token = await getSudregToken();
-        const emailData = await fetchSudregEmailsByMbs(token, mbsKey, row.oib);
+        const emailData = await fetchSudregEmailsByMbs(mbsKey, row.oib);
         deleteCompanyEmails.run(mbsKey);
         for (const email of emailData.emails) {
           insertCompanyEmail.run(mbsKey, email, JSON.stringify(emailData.raw || null));

@@ -1911,10 +1911,23 @@ Rules:
   };
   const initializeSudregSync = () => {
     const cachedCompanies = db.prepare("SELECT COUNT(*) as count FROM registry_hr_companies").get() as { count: number };
+    const enrichedCompanies = db.prepare("SELECT COUNT(DISTINCT mbs) as count FROM registry_hr_company_nkds").get() as { count: number };
+    const incompleteCompanies = Math.max(0, Number(cachedCompanies.count || 0) - Number(enrichedCompanies.count || 0));
+    const startupSyncEnabled = String(process.env.SUDREG_SYNC_ON_START || "1") !== "0";
     console.log(`[Sudreg] Cached companies on startup: ${cachedCompanies.count}`);
-    if (cachedCompanies.count === 0) {
-      console.log("[Sudreg] Cache is empty; starting initial sync immediately.");
+    console.log(`[Sudreg] Enriched companies on startup: ${enrichedCompanies.count}`);
+    console.log(`[Sudreg] Incomplete companies on startup: ${incompleteCompanies}`);
+    if (startupSyncEnabled) {
+      if (cachedCompanies.count === 0) {
+        console.log("[Sudreg] Cache is empty; starting initial sync immediately.");
+      } else if (incompleteCompanies > 0) {
+        console.log("[Sudreg] Found incomplete cached companies; resuming sync immediately.");
+      } else {
+        console.log("[Sudreg] Startup sync enabled; running incremental sync immediately.");
+      }
       startSudregSync();
+    } else {
+      console.log("[Sudreg] Startup sync disabled by SUDREG_SYNC_ON_START=0.");
     }
     console.log("[Sudreg] Daily sync scheduled for 04:00 server local time.");
     scheduleDailySudregSync();

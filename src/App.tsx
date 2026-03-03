@@ -249,7 +249,6 @@ export default function App() {
     if (workspaceMode !== 'registry') return;
 
     let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
 
     const poll = async () => {
       try {
@@ -278,10 +277,8 @@ export default function App() {
       .then((data) => setCroatiaCountyGeoJson(data || null))
       .catch(() => setCroatiaCountyGeoJson(null))
       .finally(() => setIsLoadingCroatiaCountyGeoJson(false));
-    timer = setInterval(poll, 1500);
     return () => {
       cancelled = true;
-      if (timer) clearInterval(timer);
     };
   }, [workspaceMode]);
 

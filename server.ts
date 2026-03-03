@@ -1915,6 +1915,49 @@ Rules:
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/đ/g, "d")
         .replace(/Đ/g, "D");
+    const normalizeCounty = (value: string) =>
+      stripDiacritics(String(value || ""))
+        .toLowerCase()
+        .replace(/\bzupanija\b/g, "")
+        .replace(/\bžupanija\b/g, "")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+    const extractCountyCandidates = (row: any): string[] => {
+      const candidates = new Set<string>();
+      const directCounty = String(row?.county || "").trim();
+      if (directCounty) candidates.add(directCounty);
+      try {
+        const parsed = row?.raw_json ? JSON.parse(row.raw_json) : null;
+        const detail = extractSudregDetail(parsed || {});
+        const seatCounty = String(detail?.sjediste?.naziv_zupanije || "").trim();
+        const courtCounty = String(detail?.sud_nadlezan?.naziv_zupanije || "").trim();
+        const officeCounty = String(detail?.sud_sluzba?.naziv_zupanije || "").trim();
+        if (seatCounty) candidates.add(seatCounty);
+        if (courtCounty) candidates.add(courtCounty);
+        if (officeCounty) candidates.add(officeCounty);
+      } catch {
+        // Ignore malformed cached JSON rows.
+      }
+      return Array.from(candidates);
+    };
+    const rowMatchesCounty = (row: any, countyFilterNormalized: string) => {
+      if (!countyFilterNormalized) return true;
+      const candidates = extractCountyCandidates(row);
+      if (!candidates.length) return false;
+      return candidates.some((c) => normalizeCounty(c) === countyFilterNormalized);
+    };
+    const mapCompanyRow = (row: any) => ({
+      mbs: row.mbs,
+      name: row.name,
+      oib: row.oib,
+      court: row.court,
+      status: row.status,
+      city: row.city,
+      county: row.county,
+      address: row.address,
+      website: row.website,
+      updated_at: row.updated_at,
+    });
     const q = String(req.query.q || "").trim();
     const nkdSingle = normalizeNkdCode(String(req.query.nkd || "").trim());
     const nkdCodesRaw = String(req.query.nkd_codes || "").trim();
@@ -1931,12 +1974,7 @@ Rules:
       nkdModeRaw === "primary" || nkdModeRaw === "secondary" ? (nkdModeRaw as "primary" | "secondary") : "any";
     const city = String(req.query.city || "").trim();
     const county = String(req.query.county || "").trim();
-    const countyAscii = stripDiacritics(county);
-    const countyTokens = county
-      .split(/\s+/)
-      .map((t) => t.trim())
-      .filter((t) => t.length >= 3)
-      .slice(0, 6);
+    const countyNormalized = normalizeCounty(county);
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
     const like = `%${q}%`;
     const cityLike = `%${city}%`;
@@ -1944,7 +1982,6 @@ Rules:
     const hasNkd = nkdCodes.length > 0;
     const hasCity = !!city;
     const hasCounty = !!county;
-    let rows: any[] = [];
     const params: any[] = [];
     let where = "WHERE 1=1";
     if (hasQ) {
@@ -1955,34 +1992,35 @@ Rules:
       where += " AND c.city LIKE ?";
       params.push(cityLike);
     }
-    if (hasCounty) {
-      const countyTokenSql = countyTokens.map(() => "c.raw_json LIKE ?").join(" OR ");
-      where += ` AND (
-        LOWER(TRIM(COALESCE(c.county, ''))) = LOWER(TRIM(?))
-        OR LOWER(COALESCE(c.county, '')) LIKE LOWER(?)
-        OR c.raw_json LIKE ?
-        OR c.raw_json LIKE ?
-        ${countyTokenSql ? `OR (${countyTokenSql})` : ""}
-      )`;
-      params.push(
-        county,
-        `%${county}%`,
-        `%${county}%`,
-        `%${countyAscii}%`,
-        ...countyTokens.map((t) => `%${t}%`)
-      );
-    }
     if (!hasNkd) {
-      rows = db
-        .prepare(`
-          SELECT DISTINCT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at
-          FROM registry_hr_companies c
-          ${where}
-          ORDER BY c.updated_at DESC
-          LIMIT ?
-        `)
-        .all(...params, limit);
-      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: rows.length, results: rows });
+      const matches: any[] = [];
+      const seen = new Set<string>();
+      const batchSize = 2000;
+      let offset = 0;
+      for (;;) {
+        const batch = db
+          .prepare(`
+            SELECT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at, c.raw_json
+            FROM registry_hr_companies c
+            ${where}
+            ORDER BY c.updated_at DESC
+            LIMIT ? OFFSET ?
+          `)
+          .all(...params, batchSize, offset) as Array<any>;
+        if (!batch.length) break;
+        for (const row of batch) {
+          const mbs = String(row.mbs || "").trim();
+          if (!mbs || seen.has(mbs)) continue;
+          seen.add(mbs);
+          if (hasCounty && !rowMatchesCounty(row, countyNormalized)) continue;
+          matches.push(mapCompanyRow(row));
+          if (matches.length >= limit) {
+            return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
+          }
+        }
+        offset += batchSize;
+      }
+      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
     }
 
     let nkdSql = "";
@@ -1999,17 +2037,35 @@ Rules:
     }
 
     if (nkdMode === "any") {
-      rows = db
-        .prepare(`
-          SELECT DISTINCT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at
-          FROM registry_hr_companies c
-          ${where}
-          ${nkdSql}
-          ORDER BY c.updated_at DESC
-          LIMIT ?
-        `)
-        .all(...params, ...nkdSqlParams, limit);
-      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: rows.length, results: rows });
+      const matches: any[] = [];
+      const seen = new Set<string>();
+      const batchSize = 2000;
+      let offset = 0;
+      for (;;) {
+        const batch = db
+          .prepare(`
+            SELECT c.mbs, c.name, c.oib, c.court, c.status, c.city, c.county, c.address, c.website, c.updated_at, c.raw_json
+            FROM registry_hr_companies c
+            ${where}
+            ${nkdSql}
+            ORDER BY c.updated_at DESC
+            LIMIT ? OFFSET ?
+          `)
+          .all(...params, ...nkdSqlParams, batchSize, offset) as Array<any>;
+        if (!batch.length) break;
+        for (const row of batch) {
+          const mbs = String(row.mbs || "").trim();
+          if (!mbs || seen.has(mbs)) continue;
+          seen.add(mbs);
+          if (hasCounty && !rowMatchesCounty(row, countyNormalized)) continue;
+          matches.push(mapCompanyRow(row));
+          if (matches.length >= limit) {
+            return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
+          }
+        }
+        offset += batchSize;
+      }
+      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
     }
 
     const matches: any[] = [];
@@ -2049,18 +2105,8 @@ Rules:
         });
         if (!hit) continue;
 
-        matches.push({
-          mbs: row.mbs,
-          name: row.name,
-          oib: row.oib,
-          court: row.court,
-          status: row.status,
-          city: row.city,
-          county: row.county,
-          address: row.address,
-          website: row.website,
-          updated_at: row.updated_at,
-        });
+        if (hasCounty && !rowMatchesCounty(row, countyNormalized)) continue;
+        matches.push(mapCompanyRow(row));
         if (matches.length >= limit) {
           return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: matches.length, results: matches });
         }

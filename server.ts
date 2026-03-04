@@ -1814,20 +1814,17 @@ Rules:
               JSON.stringify(item)
             );
 
+            // Always refresh details daily because status/NKD/other attributes can change.
+            pendingMbs.add(mbs);
             if (knownMbs.has(mbs)) {
-              if (!enrichedMbs.has(mbs)) {
-                pendingMbs.add(mbs);
-                continue;
-              }
-              sudregSyncState.skippedCompanies += 1;
               continue;
             }
             knownMbs.add(mbs);
-            pendingMbs.add(mbs);
             sudregSyncState.importedCompanies += 1;
           }
+          const existingQueued = Math.max(0, pendingMbs.size - sudregSyncState.importedCompanies);
           console.log(
-            `[Sudreg] [Phase 1/2] Completed page ${sudregSyncState.currentPage}: listed=${listedCompanies}, newQueued=${pendingMbs.size}, skippedKnown=${sudregSyncState.skippedCompanies}`
+            `[Sudreg] [Phase 1/2] Completed page ${sudregSyncState.currentPage}: listed=${listedCompanies}, detailQueued=${pendingMbs.size}, newQueued=${sudregSyncState.importedCompanies}, existingRefreshQueued=${existingQueued}`
           );
         }
 
@@ -1916,17 +1913,19 @@ Rules:
   };
 
   const scheduleDailySudregSync = () => {
-    const now = new Date();
-    const next = new Date(now);
-    next.setHours(4, 0, 0, 0);
-    if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
-    const firstDelay = next.getTime() - now.getTime();
-    setTimeout(() => {
-      startSudregSync();
-      setInterval(() => {
+    const scheduleNext = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setHours(4, 0, 0, 0);
+      if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
+      const delayMs = Math.max(1000, next.getTime() - now.getTime());
+      console.log(`[Sudreg] Next daily sync at: ${next.toString()}`);
+      setTimeout(() => {
         startSudregSync();
-      }, 24 * 60 * 60 * 1000);
-    }, firstDelay);
+        scheduleNext();
+      }, delayMs);
+    };
+    scheduleNext();
   };
   const initializeSudregSync = () => {
     const cachedCompanies = db.prepare("SELECT COUNT(*) as count FROM registry_hr_companies").get() as { count: number };

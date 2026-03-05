@@ -969,10 +969,16 @@ If linkedin_url is unknown, set it to an empty string.`,
     mbs?: string;
     website?: string;
   }) => {
+    const payload = {
+      name: String(candidate?.name || '').trim(),
+      oib: String(candidate?.oib || '').trim(),
+      mbs: String(candidate?.mbs || '').trim(),
+      website: String(candidate?.website || '').trim(),
+    };
     const res = await fetch('/api/registry/hr/companies/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(candidate),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok) {

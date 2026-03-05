@@ -692,8 +692,10 @@ async function startServer() {
   const sudregClientId = process.env.SUDREG_CLIENT_ID || 'DwET9gfo1LTWUcxtABNckA..';
   const sudregClientSecret = process.env.SUDREG_CLIENT_SECRET || 'ntRia5zAtXTKJXm6M8utuA..'; 
   let sudregTokenCache: { token: string; expiresAt: number } | null = null;
+  type SudregSyncMode = "incremental" | "full";
   let sudregSyncState: {
     running: boolean;
+    mode: SudregSyncMode;
     startedAt: string | null;
     finishedAt: string | null;
     currentPage: number;
@@ -704,6 +706,7 @@ async function startServer() {
     lastError: string | null;
   } = {
     running: false,
+    mode: "incremental",
     startedAt: null,
     finishedAt: null,
     currentPage: 0,
@@ -1044,8 +1047,11 @@ Rules:
   `);
   const deleteCompanyNkds = db.prepare("DELETE FROM registry_hr_company_nkds WHERE mbs = ?");
   const insertCompanyNkd = db.prepare(`
-    INSERT OR IGNORE INTO registry_hr_company_nkds (mbs, nkd_code, nkd_name, relation_type)
+    INSERT INTO registry_hr_company_nkds (mbs, nkd_code, nkd_name, relation_type)
     VALUES (?, ?, ?, ?)
+    ON CONFLICT(mbs, nkd_code) DO UPDATE SET
+      nkd_name = excluded.nkd_name,
+      relation_type = excluded.relation_type
   `);
   const deleteCompanyEmails = db.prepare("DELETE FROM registry_hr_company_emails WHERE mbs = ?");
   const insertCompanyEmail = db.prepare(`
@@ -1694,12 +1700,13 @@ Rules:
     }
   });
 
-  const startSudregSync = () => {
+  const startSudregSync = (mode: SudregSyncMode = "incremental") => {
     if (sudregSyncState.running) return false;
     const startedAtMs = Date.now();
-    console.log("[Sudreg] Sync started");
+    console.log(`[Sudreg] Sync started (mode=${mode})`);
     sudregSyncState = {
       running: true,
+      mode,
       startedAt: new Date().toISOString(),
       finishedAt: null,
       currentPage: 0,
@@ -1800,7 +1807,13 @@ Rules:
             if (!mbs) continue;
             listedCompanies += 1;
 
-            // Cache lightweight row immediately from list endpoint.
+            const alreadyKnown = knownMbs.has(mbs);
+            if (mode === "incremental" && alreadyKnown) {
+              sudregSyncState.skippedCompanies += 1;
+              continue;
+            }
+
+            // Cache lightweight row from list endpoint.
             upsertRegistryCompany.run(
               mbs,
               mapped.name || null,
@@ -1814,13 +1827,13 @@ Rules:
               JSON.stringify(item)
             );
 
-            // Always refresh details daily because status/NKD/other attributes can change.
             pendingMbs.add(mbs);
-            if (knownMbs.has(mbs)) {
-              continue;
+            if (!alreadyKnown) {
+              knownMbs.add(mbs);
+              sudregSyncState.importedCompanies += 1;
+            } else if (mode === "incremental") {
+              sudregSyncState.skippedCompanies += 1;
             }
-            knownMbs.add(mbs);
-            sudregSyncState.importedCompanies += 1;
           }
           const existingQueued = Math.max(0, pendingMbs.size - sudregSyncState.importedCompanies);
           console.log(
@@ -1863,7 +1876,6 @@ Rules:
               JSON.stringify(detailData)
             );
             const nkds = extractNkdsFromDetail(detailData);
-            deleteCompanyNkds.run(mbs);
             for (const nkd of nkds) {
               insertCompanyNkd.run(mbs, nkd.code, nkd.name || null, nkd.relationType);
             }
@@ -1921,7 +1933,25 @@ Rules:
       const delayMs = Math.max(1000, next.getTime() - now.getTime());
       console.log(`[Sudreg] Next daily sync at: ${next.toString()}`);
       setTimeout(() => {
-        startSudregSync();
+        startSudregSync("incremental");
+        scheduleNext();
+      }, delayMs);
+    };
+    scheduleNext();
+  };
+  const scheduleWeeklyFullSudregSync = () => {
+    const scheduleNext = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setHours(2, 0, 0, 0);
+      const day = next.getDay();
+      const daysUntilSunday = (7 - day) % 7;
+      if (daysUntilSunday > 0) next.setDate(next.getDate() + daysUntilSunday);
+      if (daysUntilSunday === 0 && next.getTime() <= now.getTime()) next.setDate(next.getDate() + 7);
+      const delayMs = Math.max(1000, next.getTime() - now.getTime());
+      console.log(`[Sudreg] Next weekly full sync at: ${next.toString()}`);
+      setTimeout(() => {
+        startSudregSync("full");
         scheduleNext();
       }, delayMs);
     };
@@ -1935,25 +1965,25 @@ Rules:
     console.log(`[Sudreg] Cached companies on startup: ${cachedCompanies.count}`);
     console.log(`[Sudreg] Enriched companies on startup: ${enrichedCompanies.count}`);
     console.log(`[Sudreg] Incomplete companies on startup: ${incompleteCompanies}`);
-    if (startupSyncEnabled) {
-      if (cachedCompanies.count === 0) {
-        console.log("[Sudreg] Cache is empty; starting initial sync immediately.");
-      } else if (incompleteCompanies > 0) {
-        console.log("[Sudreg] Found incomplete cached companies; resuming sync immediately.");
-      } else {
-        console.log("[Sudreg] Startup sync enabled; running incremental sync immediately.");
-      }
-      startSudregSync();
+    if (startupSyncEnabled && cachedCompanies.count === 0) {
+      console.log("[Sudreg] Cache is empty; starting initial sync immediately.");
+      startSudregSync("full");
+    } else if (startupSyncEnabled) {
+      console.log("[Sudreg] Startup sync skipped because cache already has data.");
     } else {
       console.log("[Sudreg] Startup sync disabled by SUDREG_SYNC_ON_START=0.");
     }
-    console.log("[Sudreg] Daily sync scheduled for 04:00 server local time.");
+    console.log("[Sudreg] Daily incremental sync scheduled for 04:00 server local time.");
     scheduleDailySudregSync();
+    console.log("[Sudreg] Weekly full sync scheduled for Sunday at 02:00 server local time.");
+    scheduleWeeklyFullSudregSync();
   };
   initializeSudregSync();
 
   app.post("/api/registry/hr/sync/start", (req, res) => {
-    const started = startSudregSync();
+    const requestedMode = String(req.body?.mode || "incremental").trim().toLowerCase();
+    const mode: SudregSyncMode = requestedMode === "full" ? "full" : "incremental";
+    const started = startSudregSync(mode);
     if (!started) {
       return res.status(409).json({ error: "Sinkronizacija je već u tijeku", state: sudregSyncState });
     }

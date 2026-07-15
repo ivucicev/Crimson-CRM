@@ -13,7 +13,6 @@ const dbPath = process.env.DATABASE_PATH
   : path.resolve(process.cwd(), "data", "crimson.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
-db.function("norm_text", (value: unknown) => String(value ?? "").trim().toLocaleLowerCase("hr"));
 const SESSION_COOKIE = "crm_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 
@@ -564,6 +563,12 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS uq_fields_tenant_label ON custom_field_definitions(tenant_id, label);
 `);
 
+// One-time cleanup: older sync runs could leave stray leading/trailing
+// whitespace on county, which breaks the plain equality match used by
+// the county filter (kept plain, rather than wrapped in a normalizing
+// function, so it can still use idx_registry_hr_companies_county).
+db.exec(`UPDATE registry_hr_companies SET county = TRIM(county) WHERE county IS NOT NULL AND county <> TRIM(county)`);
+
 const allUsers = db.prepare("SELECT id, email, default_tenant_id FROM users").all() as Array<{ id: number; email: string; default_tenant_id: number | null }>;
 for (const user of allUsers) {
   let tenantId = user.default_tenant_id || null;
@@ -914,11 +919,12 @@ Rules:
       item?.grad ||
       item?.city ||
       "",
-    county:
+    county: String(
       item?.sjediste?.naziv_zupanije ||
       item?.sud_nadlezan?.naziv_zupanije ||
       item?.sud_sluzba?.naziv_zupanije ||
-      "",
+      ""
+    ).trim(),
     address:
       item?.adresa ||
       [
@@ -2033,10 +2039,13 @@ Rules:
       params.push(cityLike);
     }
     if (hasCounty) {
-      // Compare normalized (trimmed, lowercased) text: some rows were cached by
-      // older sync code with inconsistent county casing/whitespace, so an exact
-      // match silently drops matching companies from county-filtered results.
-      where += " AND norm_text(c.county) = norm_text(?)";
+      // Plain equality so this can use idx_registry_hr_companies_county.
+      // Wrapping the column in a normalizing function (tried previously)
+      // defeats the index and forces a full-table scan with a JS callback
+      // per row -- fine on a small cache, but times out on the full
+      // registry. Data cleanliness is handled at write time instead
+      // (see the county TRIM() below and in mapSudregCompany).
+      where += " AND c.county = ?";
       params.push(county);
     }
 

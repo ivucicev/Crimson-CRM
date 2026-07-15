@@ -1956,7 +1956,13 @@ Rules:
             listedCompanies += 1;
 
             const alreadyKnown = knownMbs.has(mbs);
-            if (mode === "incremental" && alreadyKnown) {
+            // Only skip companies that are both cached AND already enriched
+            // (have NKD detail from a successful Phase 2 pass). Previously
+            // this skipped anything already cached, so a company whose detail
+            // fetch failed once would never be retried by the daily
+            // incremental sync -- only by the weekly full sync, which until
+            // the Phase 1 fallback fix above could actively re-break it.
+            if (mode === "incremental" && alreadyKnown && enrichedMbs.has(mbs)) {
               sudregSyncState.skippedCompanies += 1;
               continue;
             }
@@ -1994,8 +2000,6 @@ Rules:
             if (!alreadyKnown) {
               knownMbs.add(mbs);
               sudregSyncState.importedCompanies += 1;
-            } else if (mode === "incremental") {
-              sudregSyncState.skippedCompanies += 1;
             }
           }
           const existingQueued = Math.max(0, pendingMbs.size - sudregSyncState.importedCompanies);

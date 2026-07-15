@@ -735,7 +735,7 @@ async function startServer() {
             role: "system",
             content: json
               ? "You are a CRM assistant. Return valid JSON only with no markdown wrappers."
-              : "You are a CRM assistant. Be concise and practical.",
+              : "You are a CRM assistant for a Croatian sales team. Always respond in Croatian, be concise and practical.",
           },
           { role: "user", content: prompt },
         ],

@@ -506,6 +506,16 @@ export default function App() {
     return JSON.parse(cleaned);
   };
 
+  const textToHtmlParagraphs = (text: string): string => {
+    if (/<p[\s>]/i.test(text) || /<br/i.test(text)) return text;
+    return text
+      .split(/\n{2,}/)
+      .map(block => block.trim())
+      .filter(Boolean)
+      .map(block => `<p>${block.replace(/\n/g, '<br>')}</p>`)
+      .join('');
+  };
+
   const generateWithAI = async (prompt: string, json = false): Promise<string> => {
     const res = await fetch('/api/ai/generate', {
       method: 'POST',
@@ -1143,15 +1153,16 @@ If linkedin_url is unknown, set it to an empty string.`,
     if (!leadDetail) return;
     setIsGeneratingTemplate(true);
     try {
-      const text = await generateWithAI(`Generate a professional, personalized outreach email template for a lead.
-        Lead Name: ${leadDetail.name}
-        Company: ${leadDetail.company}
-        Bio/Context: ${leadDetail.bio || 'N/A'}
-        Industry: ${leadDetail.title || 'N/A'}
-        
-        The email should be concise, friendly, and focused on starting a conversation.`,
+      const text = await generateWithAI(`Napiši profesionalan, personaliziran email za hladni kontakt (outreach) prema potencijalnom klijentu, na hrvatskom jeziku.
+        Ime kontakta: ${leadDetail.name}
+        Tvrtka: ${leadDetail.company}
+        Bio/kontekst: ${leadDetail.bio || 'N/A'}
+        Industrija: ${leadDetail.title || 'N/A'}
+
+        Email treba biti sažet, prijateljski i usmjeren na pokretanje razgovora.
+        Format odgovora: čisti HTML s odvojenim <p> odlomcima za pozdrav, tijelo teksta i pozdravni završetak. Bez markdowna, bez naslova, bez code blocka.`,
       );
-      setNewComm(prev => ({ ...prev, type: 'Email', content: text || '' }));
+      setNewComm(prev => ({ ...prev, type: 'Email', content: textToHtmlParagraphs(text || '') }));
     } catch (error) {
       console.error("Generation failed:", error);
       alert("Generiranje predloška nije uspjelo.");
@@ -1164,11 +1175,11 @@ If linkedin_url is unknown, set it to an empty string.`,
     if (!leadDetail || !newComm.content) return;
     setIsGeneratingSubject(true);
     try {
-      const text = await generateWithAI(`Based on the following email content and lead company, generate a single compelling email subject line.
-        Company: ${leadDetail.company}
-        Email Content: ${newComm.content}
-        
-        Return ONLY the subject line text.`,
+      const text = await generateWithAI(`Na temelju sadržaja emaila i naziva tvrtke, generiraj jedan uvjerljiv naslov (subject) emaila, na hrvatskom jeziku.
+        Tvrtka: ${leadDetail.company}
+        Sadržaj emaila: ${newComm.content}
+
+        Vrati SAMO tekst naslova, bez navodnika i bez dodatnog objašnjenja.`,
       );
       setNewComm(prev => ({ ...prev, subject: text.trim() || prev.subject }));
     } catch (error) {

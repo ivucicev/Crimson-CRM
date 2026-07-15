@@ -2894,8 +2894,24 @@ Hard rules:
     let companyRegistryDetail: any = null;
     let companyRegistryStructured: any = null;
     try {
-      if (lead?.company_registry_raw_json) {
-        const parsed = JSON.parse(lead.company_registry_raw_json);
+      // Prefer the live Sudreg cache over the snapshot frozen at import time:
+      // registry_hr_companies gets enriched by background sync workers after
+      // import, but companies.registry_raw_json is never refreshed once set.
+      let rawJsonSource: string | null = null;
+      if (lead?.company_mbs) {
+        const liveCache = db
+          .prepare(`
+            SELECT raw_json FROM registry_hr_companies
+            WHERE mbs = ? OR ltrim(mbs, '0') = ltrim(?, '0')
+            LIMIT 1
+          `)
+          .get(lead.company_mbs, lead.company_mbs) as { raw_json: string | null } | undefined;
+        if (liveCache?.raw_json) rawJsonSource = liveCache.raw_json;
+      }
+      if (!rawJsonSource) rawJsonSource = lead?.company_registry_raw_json || null;
+
+      if (rawJsonSource) {
+        const parsed = JSON.parse(rawJsonSource);
         const detail = extractSudregDetail(parsed || {});
         const parsedEmails = (() => {
           try {

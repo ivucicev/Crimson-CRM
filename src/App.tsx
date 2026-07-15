@@ -1368,18 +1368,6 @@ If linkedin_url is unknown, set it to an empty string.`,
     if (Number.isNaN(d.getTime())) return '—';
     return d.toLocaleDateString();
   };
-  const parseCompanyEmails = (raw?: string) => {
-    if (!raw) return [] as string[];
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.map((x) => String(x || '').trim()).filter(Boolean);
-      }
-      return [];
-    } catch {
-      return [];
-    }
-  };
 
   if (!authReady) {
     return (
@@ -1752,55 +1740,6 @@ If linkedin_url is unknown, set it to an empty string.`,
                       </span>
                     </div>
 
-                    {(leadDetail.company_oib || leadDetail.company_mbs || leadDetail.company_city || leadDetail.company_county || leadDetail.company_address || leadDetail.company_primary_nkd_code || leadDetail.company_legal_form) && (
-                      <div className="mt-4 p-3 bg-white rounded-xl border border-slate-200">
-                        <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-2">Uvezeni podaci iz registra</p>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600">
-                          <p>OIB: <span className="text-slate-800">{leadDetail.company_oib || 'N/A'}</span></p>
-                          <p>MBS: <span className="text-slate-800">{leadDetail.company_mbs || 'N/A'}</span></p>
-                          <p>Grad: <span className="text-slate-800">{leadDetail.company_city || 'N/A'}</span></p>
-                          <p>Županija: <span className="text-slate-800">{leadDetail.company_county || 'N/A'}</span></p>
-                          <p className="col-span-2">Adresa: <span className="text-slate-800">{leadDetail.company_address || 'N/A'}</span></p>
-                          <p className="col-span-2">Sud: <span className="text-slate-800">{leadDetail.company_court || 'N/A'}</span></p>
-                          <p className="col-span-2">Pravni oblik: <span className="text-slate-800">{leadDetail.company_legal_form || 'N/A'}</span></p>
-                          <p className="col-span-2">Primarni NKD: <span className="text-slate-800">{leadDetail.company_primary_nkd_code || 'N/A'}{leadDetail.company_primary_nkd_name ? ` - ${leadDetail.company_primary_nkd_name}` : ''}</span></p>
-                        </div>
-                        {parseCompanyEmails(leadDetail.company_registry_emails).length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {parseCompanyEmails(leadDetail.company_registry_emails).map((email) => (
-                              <a
-                                key={email}
-                                href={`mailto:${email}`}
-                                className="px-2 py-1 rounded-full text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 hover:underline"
-                              >
-                                {email}
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {(leadDetail.company_registry_detail || leadDetail.company_registry_raw_json) && (
-                      <details className="mt-4 rounded-xl border border-slate-200 bg-white">
-                        <summary className="cursor-pointer px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                          Potpuni uvezeni podaci iz registra
-                        </summary>
-                        <div className="px-3 pb-3 space-y-2">
-                          {leadDetail.company_registry_structured && (
-                            <div className="grid grid-cols-2 gap-2 text-xs text-slate-600">
-                              <p>Procedures: <span className="text-slate-800">{(leadDetail.company_registry_structured?.status_procedures || []).length}</span></p>
-                              <p>Branches: <span className="text-slate-800">{(leadDetail.company_registry_structured?.branches || []).length}</span></p>
-                              <p>Activities: <span className="text-slate-800">{(leadDetail.company_registry_structured?.activities?.evidencijske_djelatnosti || []).length}</span></p>
-                              <p>GFI Reports: <span className="text-slate-800">{(leadDetail.company_registry_structured?.financial_reports || []).length}</span></p>
-                            </div>
-                          )}
-                          <pre className="text-xs leading-relaxed bg-slate-950 text-slate-100 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
-{JSON.stringify(leadDetail.company_registry_detail || (() => { try { return JSON.parse(leadDetail.company_registry_raw_json || 'null'); } catch { return null; } })(), null, 2)}
-                          </pre>
-                        </div>
-                      </details>
-                    )}
 
                     {leadDetail.bio && (
                       <div className="mt-4 p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -2121,6 +2060,23 @@ If linkedin_url is unknown, set it to an empty string.`,
                             <p className="text-sm text-ink">Postupak: {renderValue(leadDetail.company_registry_structured?.postupak)}</p>
                             <p className="text-sm text-ink">Pravni oblik: {renderValue(leadDetail.company_registry_structured?.legal_form?.naziv || leadDetail.company_registry_structured?.legal_form)}</p>
                           </div>
+
+                          {(leadDetail.company_registry_structured?.emails || []).length > 0 && (
+                            <div className="p-3 rounded-xl bg-white border border-slate-200">
+                              <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold mb-2">E-mailovi iz registra</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {leadDetail.company_registry_structured.emails.map((email: string) => (
+                                  <a
+                                    key={email}
+                                    href={`mailto:${email}`}
+                                    className="px-2 py-1 rounded-full text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 hover:underline"
+                                  >
+                                    {email}
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-2 gap-3">
                             <div className="p-3 rounded-xl bg-white border border-slate-200">

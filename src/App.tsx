@@ -125,6 +125,8 @@ export default function App() {
     status?: string;
     website?: string;
   }>>([]);
+  const [croatiaCompanyTotal, setCroatiaCompanyTotal] = useState(0);
+  const [isLoadingMoreCroatiaCompanies, setIsLoadingMoreCroatiaCompanies] = useState(false);
   const [croatiaNkds, setCroatiaNkds] = useState<Array<{ code: string; name?: string }>>([]);
   const [croatiaCounties, setCroatiaCounties] = useState<Array<{ slug: string; name: string; file: string }>>([]);
   const [croatiaNkdQuery, setCroatiaNkdQuery] = useState('');
@@ -737,27 +739,50 @@ If linkedin_url is unknown, set it to an empty string.`,
     }
   };
 
-  const handleSearchCroatiaCompanies = async () => {
+  const buildCroatiaCompanySearchParams = (offset: number) => {
     const query = croatiaCompanyQuery.trim();
     const city = selectedCroatiaCity.trim();
     const county = selectedCroatiaCounty.trim();
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    if (selectedCroatiaNkds.length) params.set('nkd_codes', selectedCroatiaNkds.join(','));
+    if (selectedCroatiaNkds.length) params.set('nkd_mode', selectedCroatiaNkdMode);
+    if (city) params.set('city', city);
+    if (county) params.set('county', county);
+    params.set('limit', '500');
+    params.set('offset', String(offset));
+    return params;
+  };
+
+  const handleSearchCroatiaCompanies = async () => {
     setIsSearchingCroatiaCompanies(true);
     try {
-      const params = new URLSearchParams();
-      if (query) params.set('q', query);
-      if (selectedCroatiaNkds.length) params.set('nkd_codes', selectedCroatiaNkds.join(','));
-      if (selectedCroatiaNkds.length) params.set('nkd_mode', selectedCroatiaNkdMode);
-      if (city) params.set('city', city);
-      if (county) params.set('county', county);
-      params.set('limit', '500');
+      const params = buildCroatiaCompanySearchParams(0);
       const res = await fetch(`/api/registry/hr/companies/search?${params.toString()}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Pretraga hrvatskih tvrtki nije uspjela');
       setCroatiaCompanyResults(data.results || []);
+      setCroatiaCompanyTotal(typeof data.total === 'number' ? data.total : (data.results || []).length);
     } catch (error: any) {
       alert(error.message);
     } finally {
       setIsSearchingCroatiaCompanies(false);
+    }
+  };
+
+  const handleLoadMoreCroatiaCompanies = async () => {
+    setIsLoadingMoreCroatiaCompanies(true);
+    try {
+      const params = buildCroatiaCompanySearchParams(croatiaCompanyResults.length);
+      const res = await fetch(`/api/registry/hr/companies/search?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Pretraga hrvatskih tvrtki nije uspjela');
+      setCroatiaCompanyResults(prev => [...prev, ...(data.results || [])]);
+      setCroatiaCompanyTotal(typeof data.total === 'number' ? data.total : croatiaCompanyResults.length + (data.results || []).length);
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setIsLoadingMoreCroatiaCompanies(false);
     }
   };
 
@@ -2512,7 +2537,11 @@ If linkedin_url is unknown, set it to an empty string.`,
               </select>
             </div>
             <div className="px-4 py-2 border-b border-slate-100 text-xs text-slate-500 bg-slate-50/40">
-              {isSearchingCroatiaCompanies ? 'Pretražujem...' : `${croatiaCompanyResults.length} tvrtki`}
+              {isSearchingCroatiaCompanies
+                ? 'Pretražujem...'
+                : croatiaCompanyTotal > croatiaCompanyResults.length
+                  ? `Prikazano ${croatiaCompanyResults.length} od ${croatiaCompanyTotal} tvrtki`
+                  : `${croatiaCompanyTotal} tvrtki`}
             </div>
             <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
               {croatiaCompanyResults.map((company, index) => {
@@ -2535,6 +2564,19 @@ If linkedin_url is unknown, set it to an empty string.`,
               })}
               {!isSearchingCroatiaCompanies && croatiaCompanyResults.length === 0 && (
                 <div className="p-8 text-center text-slate-400 text-sm">Nijedna tvrtka ne odgovara odabranim filterima.</div>
+              )}
+              {!isSearchingCroatiaCompanies && croatiaCompanyTotal > croatiaCompanyResults.length && (
+                <div className="p-3">
+                  <button
+                    type="button"
+                    onClick={handleLoadMoreCroatiaCompanies}
+                    disabled={isLoadingMoreCroatiaCompanies}
+                    className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-crimson-600 hover:text-crimson-700 disabled:opacity-50 py-2 rounded-lg border border-slate-200"
+                  >
+                    {isLoadingMoreCroatiaCompanies ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    Učitaj još ({croatiaCompanyTotal - croatiaCompanyResults.length})
+                  </button>
+                </div>
               )}
             </div>
           </section>

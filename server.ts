@@ -13,6 +13,7 @@ const dbPath = process.env.DATABASE_PATH
   : path.resolve(process.cwd(), "data", "crimson.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
+db.function("norm_text", (value: unknown) => String(value ?? "").trim().toLocaleLowerCase("hr"));
 const SESSION_COOKIE = "crm_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 
@@ -2014,6 +2015,7 @@ Rules:
     const city = String(req.query.city || "").trim();
     const county = String(req.query.county || "").trim();
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
     const like = `%${q}%`;
     const cityLike = `%${city}%`;
     const hasQ = !!q;
@@ -2031,7 +2033,10 @@ Rules:
       params.push(cityLike);
     }
     if (hasCounty) {
-      where += " AND c.county = ?";
+      // Compare normalized (trimmed, lowercased) text: some rows were cached by
+      // older sync code with inconsistent county casing/whitespace, so an exact
+      // match silently drops matching companies from county-filtered results.
+      where += " AND norm_text(c.county) = norm_text(?)";
       params.push(county);
     }
 
@@ -2040,16 +2045,19 @@ Rules:
     `;
 
     if (!hasNkd) {
+      const total = (
+        db.prepare(`SELECT COUNT(*) as count FROM registry_hr_companies c ${where}`).get(...params) as { count: number }
+      ).count;
       const rows = db
         .prepare(`
           SELECT ${selectColumns}
           FROM registry_hr_companies c
           ${where}
           ORDER BY c.updated_at DESC
-          LIMIT ?
+          LIMIT ? OFFSET ?
         `)
-        .all(...params, limit);
-      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: rows.length, results: rows });
+        .all(...params, limit, offset);
+      return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total, offset, results: rows });
     }
 
     const nkdPlaceholders = nkdCodes.map(() => "?").join(", ");
@@ -2064,6 +2072,11 @@ Rules:
       nkdParams.push(nkdMode);
     }
 
+    const total = (
+      db
+        .prepare(`SELECT COUNT(DISTINCT c.mbs) as count FROM registry_hr_companies c ${joinSql} ${where}`)
+        .get(...nkdParams, ...params) as { count: number }
+    ).count;
     const rows = db
       .prepare(`
         SELECT DISTINCT ${selectColumns}
@@ -2071,11 +2084,11 @@ Rules:
         ${joinSql}
         ${where}
         ORDER BY c.updated_at DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
       `)
-      .all(...nkdParams, ...params, limit);
+      .all(...nkdParams, ...params, limit, offset);
 
-    return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total: rows.length, results: rows });
+    return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total, offset, results: rows });
   });
 
   const countyLabels: Record<string, string> = {

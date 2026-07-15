@@ -1955,7 +1955,10 @@ If linkedin_url is unknown, set it to an empty string.`,
                                 <span className="text-xs font-bold text-ink">{comm.type}</span>
                                 <span className="text-[10px] text-slate-400">{new Date(comm.created_at).toLocaleString()}</span>
                               </div>
-                              <p className="text-sm text-slate-600 leading-relaxed">{comm.content}</p>
+                              <div
+                                className="text-sm text-slate-600 leading-relaxed [&_p]:mb-2 last:[&_p]:mb-0"
+                                dangerouslySetInnerHTML={{ __html: comm.content }}
+                              />
                             </div>
                           </div>
                         ))}

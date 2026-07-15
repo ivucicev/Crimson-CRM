@@ -597,6 +597,43 @@ async function startServer() {
 
   app.use(express.json({ limit: "10mb" }));
 
+  // Temporary DB diagnostics, gated by a secret token (set ADMIN_DEBUG_TOKEN
+  // in the environment to enable). Exists because SQLITE_CORRUPT showed up in
+  // production with no shell/exec access to the container to run sqlite3
+  // directly. Read-only / non-destructive: integrity check + a plain file
+  // copy for backup. Remove once the corruption is resolved.
+  app.get("/api/_admin/db-integrity", (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    try {
+      const integrity = db.pragma("integrity_check");
+      const counts: Record<string, number | string> = {};
+      for (const table of ["users", "tenants", "leads", "companies", "registry_hr_companies"]) {
+        try {
+          counts[table] = (db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as { c: number }).c;
+        } catch (error: any) {
+          counts[table] = `error: ${error.message}`;
+        }
+      }
+      res.json({ dbPath, integrity, counts });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/_admin/db-backup", (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    try {
+      const backupPath = `${dbPath}.backup-${Date.now()}`;
+      fs.copyFileSync(dbPath, backupPath);
+      const stat = fs.statSync(backupPath);
+      res.json({ backupPath, sizeBytes: stat.size });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   const parseCookies = (cookieHeader?: string) => {
     const out: Record<string, string> = {};
     for (const part of String(cookieHeader || "").split(";")) {

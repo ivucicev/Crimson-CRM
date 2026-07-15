@@ -3049,6 +3049,44 @@ If linkedin_url is unknown, set it to an empty string.`,
         )}
       </AnimatePresence>
 
+      {/* Email Preview Modal */}
+      <AnimatePresence>
+        {isPreviewOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsPreviewOpen(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <h2 className="text-xl font-bold text-ink">Pregled e-maila</h2>
+                <button onClick={() => setIsPreviewOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 max-h-[70vh] overflow-y-auto space-y-4">
+                <div className="space-y-1 text-sm">
+                  <p><span className="font-semibold text-slate-500">Prima:</span> {leadDetail?.email}</p>
+                  <p><span className="font-semibold text-slate-500">Predmet:</span> {newComm.subject || '(bez predmeta)'}</p>
+                </div>
+                <div
+                  className="border border-slate-200 rounded-xl p-4 text-sm text-slate-700 leading-relaxed [&_p]:mb-2 last:[&_p]:mb-0"
+                  dangerouslySetInnerHTML={{ __html: newComm.content || '<p class="text-slate-400">(prazan sadržaj)</p>' }}
+                />
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Add Lead Modal */}
       <AnimatePresence>
         {isAddingLead && (

@@ -567,7 +567,13 @@ db.exec(`
 // whitespace on county, which breaks the plain equality match used by
 // the county filter (kept plain, rather than wrapped in a normalizing
 // function, so it can still use idx_registry_hr_companies_county).
-db.exec(`UPDATE registry_hr_companies SET county = TRIM(county) WHERE county IS NOT NULL AND county <> TRIM(county)`);
+// Guarded: this is a full scan+write over a large table, so a bad page
+// anywhere in it must not take down the whole server on boot.
+try {
+  db.exec(`UPDATE registry_hr_companies SET county = TRIM(county) WHERE county IS NOT NULL AND county <> TRIM(county)`);
+} catch (error: any) {
+  console.error("[Startup] County TRIM cleanup failed, continuing without it:", error.message);
+}
 
 const allUsers = db.prepare("SELECT id, email, default_tenant_id FROM users").all() as Array<{ id: number; email: string; default_tenant_id: number | null }>;
 for (const user of allUsers) {

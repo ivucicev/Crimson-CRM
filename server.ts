@@ -659,6 +659,24 @@ async function startServer() {
     }
   });
 
+  // Read-only ad-hoc query for diagnosing production data without shell
+  // access. SELECT-only (better-sqlite3 .prepare() rejects multiple
+  // statements anyway), results capped at 200 rows.
+  app.post("/api/_admin/db-query", (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    const sql = String(req.body?.sql || "").trim();
+    if (!/^select\s/i.test(sql)) {
+      return res.status(400).json({ error: "Only SELECT statements are allowed" });
+    }
+    try {
+      const rows = db.prepare(sql).all().slice(0, 200);
+      res.json({ rowCount: rows.length, rows });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   const parseCookies = (cookieHeader?: string) => {
     const out: Record<string, string> = {};
     for (const part of String(cookieHeader || "").split(";")) {

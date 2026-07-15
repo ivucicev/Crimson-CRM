@@ -677,6 +677,46 @@ async function startServer() {
     }
   });
 
+  // Same live re-fetch as GET /api/registry/hr/companies/:mbs/detail?force=1,
+  // but reachable without a login session -- that route sits behind the
+  // global requireAuth gate below, and we don't have production credentials
+  // to test with. Diagnostic-only: forces one company's cached row to match
+  // what Sudreg's live detail endpoint returns right now.
+  app.post("/api/_admin/registry-refresh", async (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    const mbsKey = String(req.query.mbs || "").trim();
+    if (!mbsKey) return res.status(400).json({ error: "mbs required" });
+    try {
+      const before = db.prepare(`SELECT mbs, name, city, county, updated_at FROM registry_hr_companies WHERE mbs = ?`).get(mbsKey);
+      const endpoint = `${sudregBaseUrl}/detalji_subjekta?tip_identifikatora=mbs&identifikator=${encodeURIComponent(mbsKey)}&expand_relations=1`;
+      const liveData = await fetchSudreg(endpoint);
+      const detail = extractSudregDetail(liveData);
+      const mapped = mapSudregCompany(detail);
+      upsertRegistryCompany.run(
+        mbsKey,
+        mapped.name || null,
+        mapped.oib || null,
+        mapped.court || null,
+        mapped.status || null,
+        mapped.city || null,
+        mapped.county || null,
+        mapped.address || null,
+        mapped.website || null,
+        JSON.stringify(liveData)
+      );
+      const nkds = extractNkdsFromDetail(liveData);
+      deleteCompanyNkds.run(mbsKey);
+      for (const nkd of nkds) {
+        insertCompanyNkd.run(mbsKey, nkd.code, nkd.name || null, nkd.relationType);
+      }
+      const after = db.prepare(`SELECT mbs, name, city, county, updated_at FROM registry_hr_companies WHERE mbs = ?`).get(mbsKey);
+      res.json({ before, after, liveMappedCounty: mapped.county || null, liveDetailKeys: Object.keys(detail || {}) });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   const parseCookies = (cookieHeader?: string) => {
     const out: Record<string, string> = {};
     for (const part of String(cookieHeader || "").split(";")) {

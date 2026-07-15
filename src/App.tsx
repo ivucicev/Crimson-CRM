@@ -1097,6 +1097,17 @@ If linkedin_url is unknown, set it to an empty string.`,
     fetchLeadDetail(selectedLeadId);
   };
 
+  const handleMailto = () => {
+    if (!leadDetail) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = newComm.content || '';
+    const body = tmp.innerText || tmp.textContent || '';
+    const to = encodeURIComponent(leadDetail.email || '');
+    const subject = encodeURIComponent(newComm.subject || '');
+    const encodedBody = encodeURIComponent(body);
+    window.location.href = `mailto:${to}?subject=${subject}&body=${encodedBody}`;
+  };
+
   const handleSendEmail = async () => {
     if (!leadDetail || !newComm.content || !newComm.subject) return;
     setIsSendingEmail(true);
@@ -1913,7 +1924,19 @@ If linkedin_url is unknown, set it to an empty string.`,
                           
                           <div className="flex gap-2">
                             {newComm.type === 'Email' && (
-                              <button 
+                              <button
+                                type="button"
+                                onClick={handleMailto}
+                                disabled={!newComm.content || !newComm.subject}
+                                title="Otvori u e-mail klijentu"
+                                className="bg-white text-slate-600 border border-slate-200 px-4 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-50 disabled:opacity-50 transition-all flex items-center gap-2"
+                              >
+                                <Mail className="w-3 h-3" />
+                                Otvori u klijentu
+                              </button>
+                            )}
+                            {newComm.type === 'Email' && (
+                              <button
                                 type="button"
                                 onClick={handleSendEmail}
                                 disabled={!newComm.content || !newComm.subject || isSendingEmail}

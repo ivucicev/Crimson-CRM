@@ -634,6 +634,31 @@ async function startServer() {
     }
   });
 
+  // Rebuilds a named index from current table data. Does not touch row data
+  // -- safe to run when integrity_check reports "row X missing from index Y"
+  // (an out-of-sync index, not corrupted table content). Table name is a
+  // fixed constant here, not user input, so no injection concern.
+  app.post("/api/_admin/db-reindex", (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    const indexName = String(req.query.index || "");
+    const allowedIndexes = new Set([
+      "idx_registry_hr_companies_county",
+      "idx_registry_hr_companies_city",
+      "idx_registry_hr_companies_updated_at",
+    ]);
+    if (!allowedIndexes.has(indexName)) {
+      return res.status(400).json({ error: "Unknown or unlisted index", allowed: Array.from(allowedIndexes) });
+    }
+    try {
+      db.exec(`REINDEX ${indexName}`);
+      const integrity = db.pragma("integrity_check");
+      res.json({ reindexed: indexName, integrity });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   const parseCookies = (cookieHeader?: string) => {
     const out: Record<string, string> = {};
     for (const part of String(cookieHeader || "").split(";")) {

@@ -23,6 +23,7 @@ export interface Lead {
   company_registry_raw_json?: string;
   company_registry_detail?: any;
   company_registry_structured?: any;
+  company_registry_updated_at?: string | null;
   contact_count?: number;
   first_contacted_at?: string | null;
   next_task_due_at?: string | null;

@@ -2229,7 +2229,8 @@ Rules:
 
       const mbsKey = String(row.mbs || requestedMbs).trim();
       let detail = extractSudregDetail(parsed);
-      const shouldRefresh = !hasExpandedDetail(detail);
+      const force = String(req.query.force || "") === "1";
+      const shouldRefresh = force || !hasExpandedDetail(detail);
       if (shouldRefresh) {
         try {
           const endpoint = `${sudregBaseUrl}/detalji_subjekta?tip_identifikatora=mbs&identifikator=${encodeURIComponent(mbsKey)}&expand_relations=1`;
@@ -2273,7 +2274,10 @@ Rules:
       }
 
       const structured = buildStructuredSubject(detail || {}, emails);
-      res.json({ ...row, detail, emails, structured });
+      const updatedAt = shouldRefresh
+        ? (db.prepare(`SELECT updated_at FROM registry_hr_companies WHERE mbs = ?`).get(mbsKey) as { updated_at: string } | undefined)?.updated_at || row.updated_at
+        : row.updated_at;
+      res.json({ ...row, updated_at: updatedAt, detail, emails, structured });
     })().catch((error: any) => {
       res.status(500).json({ error: "Učitavanje detalja tvrtke nije uspjelo: " + error.message });
     });
@@ -2893,6 +2897,7 @@ Hard rules:
 
     let companyRegistryDetail: any = null;
     let companyRegistryStructured: any = null;
+    let companyRegistryUpdatedAt: string | null = null;
     try {
       // Prefer the live Sudreg cache over the snapshot frozen at import time:
       // registry_hr_companies gets enriched by background sync workers after
@@ -2901,12 +2906,13 @@ Hard rules:
       if (lead?.company_mbs) {
         const liveCache = db
           .prepare(`
-            SELECT raw_json FROM registry_hr_companies
+            SELECT raw_json, updated_at FROM registry_hr_companies
             WHERE mbs = ? OR ltrim(mbs, '0') = ltrim(?, '0')
             LIMIT 1
           `)
-          .get(lead.company_mbs, lead.company_mbs) as { raw_json: string | null } | undefined;
+          .get(lead.company_mbs, lead.company_mbs) as { raw_json: string | null; updated_at: string | null } | undefined;
         if (liveCache?.raw_json) rawJsonSource = liveCache.raw_json;
+        if (liveCache?.updated_at) companyRegistryUpdatedAt = liveCache.updated_at;
       }
       if (!rawJsonSource) rawJsonSource = lead?.company_registry_raw_json || null;
 
@@ -2944,6 +2950,7 @@ Hard rules:
       ...lead,
       company_registry_detail: companyRegistryDetail,
       company_registry_structured: companyRegistryStructured,
+      company_registry_updated_at: companyRegistryUpdatedAt,
       communications: comms,
       reminders,
       contacts,

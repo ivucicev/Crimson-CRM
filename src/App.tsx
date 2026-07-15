@@ -23,7 +23,8 @@ import {
   Globe,
   Linkedin,
   Loader2,
-  Send
+  Send,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactQuill from 'react-quill-new';
@@ -68,6 +69,7 @@ export default function App() {
   const [isEnriching, setIsEnriching] = useState(false);
   const [isResearchingCompanyContacts, setIsResearchingCompanyContacts] = useState(false);
   const [isScrapingLinkedIn, setIsScrapingLinkedIn] = useState(false);
+  const [isRefreshingRegistry, setIsRefreshingRegistry] = useState(false);
   const [isGeneratingTemplate, setIsGeneratingTemplate] = useState(false);
   const [isGeneratingSubject, setIsGeneratingSubject] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -499,6 +501,24 @@ export default function App() {
     const res = await fetch(`/api/leads/${id}`);
     const data = await res.json();
     setLeadDetail(data);
+  };
+
+  const handleRefreshRegistryDetail = async () => {
+    if (!leadDetail?.company_mbs) return;
+    setIsRefreshingRegistry(true);
+    try {
+      const res = await fetch(`/api/registry/hr/companies/${encodeURIComponent(leadDetail.company_mbs)}/detail?force=1`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || 'Osvježavanje podataka nije uspjelo');
+      }
+      await fetchLeadDetail(leadDetail.id);
+    } catch (error: any) {
+      console.error("Registry refresh failed:", error);
+      alert(error.message);
+    } finally {
+      setIsRefreshingRegistry(false);
+    }
   };
 
   const parseJsonFromText = (text: string) => {
@@ -2059,6 +2079,22 @@ If linkedin_url is unknown, set it to an empty string.`,
 
                   {activeTab === 'Company' && (
                     <div className="max-w-4xl mx-auto space-y-3">
+                      {leadDetail.company_mbs && (
+                        <div className="flex items-center justify-between p-3 rounded-xl bg-white border border-slate-200">
+                          <p className="text-xs text-slate-500">
+                            Zadnje dohvaćeno iz registra: <span className="text-ink font-medium">{leadDetail.company_registry_updated_at ? new Date(leadDetail.company_registry_updated_at).toLocaleString() : 'nikad'}</span>
+                          </p>
+                          <button
+                            type="button"
+                            onClick={handleRefreshRegistryDetail}
+                            disabled={isRefreshingRegistry}
+                            className="flex items-center gap-1.5 text-xs font-bold text-crimson-600 hover:text-crimson-700 disabled:opacity-50 transition-colors"
+                          >
+                            {isRefreshingRegistry ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                            Osvježi
+                          </button>
+                        </div>
+                      )}
                       {!leadDetail.company_registry_structured ? (
                         <div className="text-center py-10 text-slate-400 text-sm">
                           Još nema uvezenih detalja tvrtke. Prvo uvezite tvrtku iz Registra.

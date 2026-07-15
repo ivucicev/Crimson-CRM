@@ -717,6 +717,21 @@ async function startServer() {
     }
   });
 
+  // Same as POST /api/registry/hr/sync/start (also behind requireAuth),
+  // reachable with the admin token. A "full" run re-touches every cached
+  // company and can take a long time against the live Sudreg API -- this
+  // exists so a full resync can be kicked off to backfill rows the Phase 1
+  // clobbering bug (fixed alongside this) already nulled out, without
+  // needing a login session.
+  app.post("/api/_admin/sync-start", (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    const mode: SudregSyncMode = req.query.mode === "full" ? "full" : "incremental";
+    const started = startSudregSync(mode);
+    if (!started) return res.status(409).json({ error: "Sync already running", state: sudregSyncState });
+    res.json({ success: true, state: sudregSyncState });
+  });
+
   const parseCookies = (cookieHeader?: string) => {
     const out: Record<string, string> = {};
     for (const part of String(cookieHeader || "").split(";")) {

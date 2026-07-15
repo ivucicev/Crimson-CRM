@@ -1946,17 +1946,32 @@ Rules:
               continue;
             }
 
+            // Preserve previously cached fields when the lightweight list
+            // item doesn't provide them (list responses don't always include
+            // sjediste/sud_nadlezan the way full detail responses do). Without
+            // this fallback, a "full" sync's Phase 1 pass -- which touches
+            // every already-known row, not just new ones -- silently wipes
+            // out city/county/etc that Phase 2 detail enrichment previously
+            // filled in, every single week.
+            const cachedRow = alreadyKnown
+              ? (db
+                  .prepare(`SELECT name, oib, court, status, city, county, address, website FROM registry_hr_companies WHERE mbs = ?`)
+                  .get(mbs) as
+                  | { name: string | null; oib: string | null; court: string | null; status: string | null; city: string | null; county: string | null; address: string | null; website: string | null }
+                  | undefined)
+              : undefined;
+
             // Cache lightweight row from list endpoint.
             upsertRegistryCompany.run(
               mbs,
-              mapped.name || null,
-              mapped.oib || null,
-              mapped.court || null,
-              mapped.status || null,
-              mapped.city || null,
-              mapped.county || null,
-              mapped.address || null,
-              mapped.website || null,
+              mapped.name || cachedRow?.name || null,
+              mapped.oib || cachedRow?.oib || null,
+              mapped.court || cachedRow?.court || null,
+              mapped.status || cachedRow?.status || null,
+              mapped.city || cachedRow?.city || null,
+              mapped.county || cachedRow?.county || null,
+              mapped.address || cachedRow?.address || null,
+              mapped.website || cachedRow?.website || null,
               JSON.stringify(item)
             );
 

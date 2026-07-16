@@ -1906,8 +1906,20 @@ Rules:
 
         const existingRows = db.prepare("SELECT mbs FROM registry_hr_companies WHERE mbs IS NOT NULL").all() as Array<{ mbs: string }>;
         const knownMbs = new Set(existingRows.map((row) => String(row.mbs).trim()).filter(Boolean));
+        // Require county to actually be populated, not just NKD presence: a
+        // company can have NKD rows (survived, separate table) from an old
+        // enrichment while its county got wiped by the Phase 1 clobbering
+        // bug (fixed above, different table). Treating NKD-presence alone as
+        // "enriched" left ~53k already-wiped companies permanently skipped
+        // by every incremental sync since they were never considered
+        // incomplete in the first place.
         const enrichedRows = db
-          .prepare("SELECT DISTINCT mbs FROM registry_hr_company_nkds WHERE mbs IS NOT NULL")
+          .prepare(`
+            SELECT DISTINCT n.mbs
+            FROM registry_hr_company_nkds n
+            JOIN registry_hr_companies c ON c.mbs = n.mbs
+            WHERE n.mbs IS NOT NULL AND c.county IS NOT NULL
+          `)
           .all() as Array<{ mbs: string }>;
         const enrichedMbs = new Set(enrichedRows.map((row) => String(row.mbs).trim()).filter(Boolean));
         const pendingMbs = new Set<string>();

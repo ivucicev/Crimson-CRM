@@ -2287,6 +2287,102 @@ Rules:
     return res.json({ query: q, nkd_codes: nkdCodes, nkd_mode: nkdMode, city, county, total, offset, results: rows });
   });
 
+  const csvCell = (value: unknown) => {
+    const str = String(value ?? "");
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+
+  app.get("/api/registry/hr/companies/export", (req, res) => {
+    const q = String(req.query.q || "").trim();
+    const nkdSingle = normalizeNkdCode(String(req.query.nkd || "").trim());
+    const nkdCodesRaw = String(req.query.nkd_codes || "").trim();
+    const nkdCodes = nkdCodesRaw
+      ? nkdCodesRaw.split(",").map((x) => normalizeNkdCode(x)).filter(Boolean)
+      : nkdSingle
+        ? [nkdSingle]
+        : [];
+    const nkdModeRaw = String(req.query.nkd_mode || "any").trim().toLowerCase();
+    const nkdMode: "any" | "primary" | "secondary" =
+      nkdModeRaw === "primary" || nkdModeRaw === "secondary" ? (nkdModeRaw as "primary" | "secondary") : "any";
+    const city = String(req.query.city || "").trim();
+    const county = String(req.query.county || "").trim();
+    const activeOnly = String(req.query.active_only || "1") !== "0";
+    const like = `%${q}%`;
+    const cityLike = `%${city}%`;
+    const params: any[] = [];
+    let where = "WHERE 1=1";
+    if (activeOnly) {
+      where += " AND c.status = 'Bez postupka'";
+    }
+    if (q) {
+      where += " AND (c.name LIKE ? OR c.oib LIKE ? OR c.mbs LIKE ?)";
+      params.push(like, like, like);
+    }
+    if (city) {
+      where += " AND c.city LIKE ?";
+      params.push(cityLike);
+    }
+    if (county) {
+      where += " AND c.county = ?";
+      params.push(county);
+    }
+
+    let joinSql = "";
+    const nkdParams: any[] = [];
+    if (nkdCodes.length) {
+      const nkdPlaceholders = nkdCodes.map(() => "?").join(", ");
+      nkdParams.push(...nkdCodes);
+      joinSql = `
+        INNER JOIN registry_hr_company_nkds cn
+          ON cn.mbs = c.mbs
+         AND cn.nkd_code IN (${nkdPlaceholders})
+      `;
+      if (nkdMode === "primary" || nkdMode === "secondary") {
+        joinSql += " AND cn.relation_type = ?";
+        nkdParams.push(nkdMode);
+      }
+    }
+
+    // Bulk sync never fetches per-company emails (only viewing a company's
+    // detail page does, via fetchSudregEmailsByMbs) -- registry_hr_company_emails
+    // is essentially unpopulated. The cached raw_json already has email_adrese
+    // for ~99.8% of companies though, so extract from that instead of relying
+    // on that near-empty table.
+    const candidates = db
+      .prepare(`
+        SELECT DISTINCT c.mbs, c.name, c.oib, c.city, c.county, c.court, c.status, c.website, c.raw_json
+        FROM registry_hr_companies c
+        ${joinSql}
+        ${where}
+        ORDER BY c.county ASC, c.name ASC
+        LIMIT 50000
+      `)
+      .all(...nkdParams, ...params) as Array<{
+        mbs: string; name: string; oib: string | null; city: string | null; county: string | null;
+        court: string | null; status: string | null; website: string | null; raw_json: string | null;
+      }>;
+
+    const header = ["Naziv", "OIB", "MBS", "Grad", "Županija", "Sud", "Status", "Web", "Emailovi"];
+    const lines = [header.map(csvCell).join(",")];
+    for (const row of candidates) {
+      let emails: string[] = [];
+      try {
+        const detail = extractSudregDetail(row.raw_json ? JSON.parse(row.raw_json) : {});
+        emails = extractEmailsFromDetail(detail);
+      } catch {
+        // Skip email extraction for rows with unparseable raw_json.
+      }
+      if (!emails.length) continue;
+      lines.push([row.name, row.oib, row.mbs, row.city, row.county, row.court, row.status, row.website, emails.join("; ")]
+        .map(csvCell).join(","));
+    }
+    const csv = "﻿" + lines.join("\r\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="registar-export-${Date.now()}.csv"`);
+    res.send(csv);
+  });
+
   const countyLabels: Record<string, string> = {
     "bjelovarsko-bilogorska-zupanija": "Bjelovarsko-bilogorska županija",
     "brodsko-posavska-zupanija": "Brodsko-posavska županija",

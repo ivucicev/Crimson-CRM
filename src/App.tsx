@@ -24,7 +24,8 @@ import {
   Linkedin,
   Loader2,
   Send,
-  RefreshCw
+  RefreshCw,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactQuill from 'react-quill-new';
@@ -752,6 +753,20 @@ If linkedin_url is unknown, set it to an empty string.`,
     params.set('limit', '500');
     params.set('offset', String(offset));
     return params;
+  };
+
+  const handleExportCroatiaCompanies = () => {
+    const query = croatiaCompanyQuery.trim();
+    const city = selectedCroatiaCity.trim();
+    const county = selectedCroatiaCounty.trim();
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    if (selectedCroatiaNkds.length) params.set('nkd_codes', selectedCroatiaNkds.join(','));
+    if (selectedCroatiaNkds.length) params.set('nkd_mode', selectedCroatiaNkdMode);
+    if (city) params.set('city', city);
+    if (county) params.set('county', county);
+    params.set('active_only', '1');
+    window.location.href = `/api/registry/hr/companies/export?${params.toString()}`;
   };
 
   const handleSearchCroatiaCompanies = async () => {
@@ -2536,12 +2551,23 @@ If linkedin_url is unknown, set it to an empty string.`,
                 <option value="secondary">NKD sekundarni</option>
               </select>
             </div>
-            <div className="px-4 py-2 border-b border-slate-100 text-xs text-slate-500 bg-slate-50/40">
-              {isSearchingCroatiaCompanies
-                ? 'Pretražujem...'
-                : croatiaCompanyTotal > croatiaCompanyResults.length
-                  ? `Prikazano ${croatiaCompanyResults.length} od ${croatiaCompanyTotal} tvrtki`
-                  : `${croatiaCompanyTotal} tvrtki`}
+            <div className="px-4 py-2 border-b border-slate-100 text-xs text-slate-500 bg-slate-50/40 flex items-center justify-between gap-2">
+              <span>
+                {isSearchingCroatiaCompanies
+                  ? 'Pretražujem...'
+                  : croatiaCompanyTotal > croatiaCompanyResults.length
+                    ? `Prikazano ${croatiaCompanyResults.length} od ${croatiaCompanyTotal} tvrtki`
+                    : `${croatiaCompanyTotal} tvrtki`}
+              </span>
+              <button
+                type="button"
+                onClick={handleExportCroatiaCompanies}
+                title="Izvezi aktivne tvrtke s emailovima iz trenutnih filtera u CSV"
+                className="flex items-center gap-1 text-[11px] font-bold text-crimson-600 hover:text-crimson-700 shrink-0"
+              >
+                <Download className="w-3 h-3" />
+                Izvezi CSV
+              </button>
             </div>
             <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
               {croatiaCompanyResults.map((company, index) => {

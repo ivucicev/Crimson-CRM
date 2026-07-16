@@ -732,6 +732,12 @@ async function startServer() {
     res.json({ success: true, state: sudregSyncState });
   });
 
+  app.get("/api/_admin/sync-status", (req, res) => {
+    const expected = process.env.ADMIN_DEBUG_TOKEN;
+    if (!expected || req.query.token !== expected) return res.status(404).end();
+    res.json(sudregSyncState);
+  });
+
   const parseCookies = (cookieHeader?: string) => {
     const out: Record<string, string> = {};
     for (const part of String(cookieHeader || "").split(";")) {
@@ -851,6 +857,8 @@ async function startServer() {
     skippedCompanies: number;
     importedNkds: number;
     lastError: string | null;
+    detailFailures: number;
+    lastDetailErrors: string[];
   } = {
     running: false,
     mode: "incremental",
@@ -862,6 +870,8 @@ async function startServer() {
     skippedCompanies: 0,
     importedNkds: 0,
     lastError: null,
+    detailFailures: 0,
+    lastDetailErrors: [],
   };
 
   const callOpenAI = async (prompt: string, json = false) => {
@@ -1863,6 +1873,8 @@ Rules:
       skippedCompanies: 0,
       importedNkds: 0,
       lastError: null,
+      detailFailures: 0,
+      lastDetailErrors: [],
     };
     (async () => {
       try {
@@ -2049,7 +2061,10 @@ Rules:
             enrichedMbs.add(mbs);
           } catch (error: any) {
             detailFailures += 1;
-            console.warn(`[Sudreg] [Phase 2/2] Detail fetch failed for mbs=${mbs}: ${formatError(error)}`);
+            sudregSyncState.detailFailures += 1;
+            const message = `mbs=${mbs}: ${formatError(error)}`;
+            sudregSyncState.lastDetailErrors = [message, ...sudregSyncState.lastDetailErrors].slice(0, 5);
+            console.warn(`[Sudreg] [Phase 2/2] Detail fetch failed for ${message}`);
           }
         };
 
